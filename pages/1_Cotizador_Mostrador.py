@@ -18,6 +18,11 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- REGLAS COMERCIALES INTERNAS (OCULTAS EN PANTALLA PARA TODOS) ---
+MIN_PZAS_NIVEL_2 = 50
+MIN_PZAS_NIVEL_3 = 60
+PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
+
 # --- CANDADO DE SESIÓN ---
 if not st.session_state.get("logged_in", False):
     st.warning("⚠️ Acceso denegado. Inicia sesión primero en la página principal (`app`).")
@@ -259,19 +264,13 @@ def enviar_respaldo_correo(pdf_bytes, nombre_archivo, folio, sucursal_nombre, cl
 def limpiar_pdf_txt(texto):
     return str(texto).encode("latin-1", "replace").decode("latin-1")
 
-def calcular_nivel_y_precio(clave, cantidad, modo_nivel, min_n2, min_n3):
+def calcular_nivel_y_precio(clave, cantidad):
     item = CATALOGO_LIGEROS[clave]
-    if modo_nivel == "Automático por Volumen":
-        if cantidad >= min_n3:
-            return "NIVEL 3", item["n3"]
-        elif cantidad >= min_n2:
-            return "NIVEL 2", item["n2"]
-        return "NIVEL 1", item["n1"]
-    elif modo_nivel == "Nivel 1 (Mostrador)":
-        return "NIVEL 1", item["n1"]
-    elif modo_nivel == "Nivel 2 (Medio Mayoreo)":
+    if cantidad >= MIN_PZAS_NIVEL_3:
+        return "NIVEL 3", item["n3"]
+    elif cantidad >= MIN_PZAS_NIVEL_2:
         return "NIVEL 2", item["n2"]
-    return "NIVEL 3", item["n3"]
+    return "NIVEL 1", item["n1"]
 
 # --- DISEÑO PDF CORPORATIVO MODERNO (OPTIMIZADO PARA logo_imac_2026.png) ---
 class PDFMostrador(FPDF):
@@ -282,11 +281,9 @@ class PDFMostrador(FPDF):
         self.fecha_txt = fecha_txt
 
     def header(self):
-        # Franja superior azul corporativo
         self.set_fill_color(15, 60, 140)
         self.rect(0, 0, 210, 4, "F")
 
-        # Logo corporativo IMAC 2026
         if os.path.exists("logo_imac_2026.png"):
             self.image("logo_imac_2026.png", x=10, y=8, w=32)
             x_titulo = 46
@@ -298,7 +295,6 @@ class PDFMostrador(FPDF):
         self.set_text_color(15, 60, 140)
         self.cell(95, 6, "GRUPO IMAC", ln=False, align="L")
 
-        # Folio y fecha en esquina derecha
         self.set_xy(135, 10)
         self.set_font("Arial", "B", 10.5)
         self.set_text_color(200, 30, 30)
@@ -314,7 +310,6 @@ class PDFMostrador(FPDF):
         self.set_text_color(95, 95, 95)
         self.cell(65, 5, limpiar_pdf_txt(f"Veracruz, Ver. | {self.fecha_txt}"), ln=True, align="R")
 
-        # Línea divisoria limpia
         self.set_draw_color(215, 222, 232)
         self.line(10, 31, 200, 31)
         self.set_y(35)
@@ -390,7 +385,6 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 
     pdf.set_y(y_cards + 42)
 
-    # Encabezado de tabla
     def dibujar_encabezado_tabla():
         pdf.set_fill_color(15, 60, 140)
         pdf.set_text_color(255, 255, 255)
@@ -532,37 +526,17 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 if "carrito_ligeros" not in st.session_state:
     st.session_state["carrito_ligeros"] = []
 
-# --- BARRA LATERAL: SUCURSAL Y REGLAS DE VOLUMEN ---
-with st.sidebar:
-    st.header("⚙️ Reglas de Mostrador")
-    puede_cambiar = (
-        st.session_state.get("sucursal_asignada", "") == "TODAS"
-        or st.session_state.get("role", "") in ["Admin", "Directivo"]
-    )
-    lista_suc = list(CONFIG_SUCURSALES.keys())
-    suc_actual = st.session_state.get("sucursal_activa", "IMAC")
-    if suc_actual not in lista_suc:
-        suc_actual = lista_suc[0]
-
-    if puede_cambiar:
-        sucursal_sel = st.selectbox("🏢 Sucursal Activa:", lista_suc, index=lista_suc.index(suc_actual))
-        st.session_state["sucursal_activa"] = sucursal_sel
-    else:
-        sucursal_sel = suc_actual
-        st.info(f"🏢 Sucursal: **{sucursal_sel}**")
-
-    modo_nivel = st.selectbox(
-        "Asignación de Nivel:",
-        ["Automático por Volumen", "Nivel 1 (Mostrador)", "Nivel 2 (Medio Mayoreo)", "Nivel 3 (Mayoreo)"]
-    )
-    min_n2 = st.number_input("Mínimo pzas para Nivel 2:", min_value=2, value=50, step=5)
-    min_n3 = st.number_input("Mínimo pzas para Nivel 3:", min_value=int(min_n2) + 1, value=100, step=10)
-    precios_incluyen_iva = st.toggle("¿Precios del catálogo incluyen IVA?", value=True)
-    enviar_correo_chk = st.checkbox("Enviar copia PDF por correo", value=False)
-    st.markdown("---")
-    st.caption(f"📦 Catálogo activo: **{len(CATALOGO_LIGEROS)} SKUs** | 👤 **{st.session_state.get('usuario', '')}**")
-
+# --- SUCURSAL ACTIVA (SIN PANEL DE REGLAS DE MOSTRADOR) ---
+lista_suc = list(CONFIG_SUCURSALES.keys())
+sucursal_sel = st.session_state.get("sucursal_activa", "IMAC")
+if sucursal_sel not in lista_suc:
+    sucursal_sel = lista_suc[0]
 suc_info_activa = CONFIG_SUCURSALES[sucursal_sel]
+
+with st.sidebar:
+    st.markdown(f"**🏢 Sucursal:** {sucursal_sel}")
+    st.caption(f"👤 {st.session_state.get('usuario', '')} ({st.session_state.get('role', '')})")
+    st.caption(f"📦 Catálogo activo: **{len(CATALOGO_LIGEROS)} SKUs**")
 
 # --- ENCABEZADO PRINCIPAL ---
 col_logo, col_tit = st.columns([1, 5])
@@ -619,7 +593,7 @@ if productos_filtrados:
     with p2:
         cant_sel = st.number_input("Cantidad", min_value=1.0, value=10.0, step=1.0)
     with p3:
-        nivel_calc, precio_calc = calcular_nivel_y_precio(clave_sel, cant_sel, modo_nivel, min_n2, min_n3)
+        nivel_calc, precio_calc = calcular_nivel_y_precio(clave_sel, cant_sel)
         ahorro_unit = info_sel["n1"] - precio_calc
         delta_txt = f"-${ahorro_unit:,.2f}/u" if ahorro_unit > 0 else "Precio Lista"
         st.metric(f"{nivel_calc}", f"${precio_calc:,.2f}", delta_txt)
@@ -630,7 +604,7 @@ if productos_filtrados:
             existente = next((x for x in st.session_state["carrito_ligeros"] if x["clave"] == clave_sel), None)
             if existente:
                 nueva_cant = existente["cantidad"] + cant_sel
-                niv_n, prec_n = calcular_nivel_y_precio(clave_sel, nueva_cant, modo_nivel, min_n2, min_n3)
+                niv_n, prec_n = calcular_nivel_y_precio(clave_sel, nueva_cant)
                 existente["cantidad"] = nueva_cant
                 existente["nivel"] = niv_n
                 existente["precio_unit"] = prec_n
@@ -652,9 +626,12 @@ else:
 if st.session_state["carrito_ligeros"]:
     st.markdown("### 📋 Partidas en la Cotización")
     for item in st.session_state["carrito_ligeros"]:
-        niv, prec = calcular_nivel_y_precio(item["clave"], item["cantidad"], modo_nivel, min_n2, min_n3)
+        niv, prec = calcular_nivel_y_precio(item["clave"], item["cantidad"])
         item["nivel"] = niv
         item["precio_unit"] = prec
+
+    # Bloqueo de descuento cuando al menos una partida alcanza Nivel 3
+    tiene_nivel_3 = any(x["nivel"] == "NIVEL 3" for x in st.session_state["carrito_ligeros"])
 
     df_carrito = pd.DataFrame([
         {
@@ -691,17 +668,31 @@ if st.session_state["carrito_ligeros"]:
                 st.rerun()
 
     st.markdown("---")
-    a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
-    with a1: flete = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, value=0.0, step=100.0)
-    with a2: desc_extra_pct = st.number_input("🏷️ Descuento Adicional (%)", min_value=0.0, max_value=30.0, value=0.0, step=0.5)
-    with a3: notas = st.text_input("Observaciones en PDF", placeholder="Ej. Entrega en planta baja, pago contra entrega...")
+
+    # --- REGLA DE DESCUENTO: SOLO VISIBLE EN NIVEL 1 Y NIVEL 2 ---
+    if tiene_nivel_3:
+        desc_extra_pct = 0.0
+        a1, a3 = st.columns([1.4, 3.6])
+        with a1:
+            flete = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, value=0.0, step=100.0)
+        with a3:
+            notas = st.text_input("Observaciones en PDF", placeholder="Ej. Entrega en planta baja, pago contra entrega...")
+        st.info("🔒 **Descuento adicional deshabilitado:** esta cotización ya incluye precios preferenciales de **Nivel 3 (Mayoreo)**.")
+    else:
+        a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
+        with a1:
+            flete = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, value=0.0, step=100.0)
+        with a2:
+            desc_extra_pct = st.number_input("🏷️ Descuento Adicional (%)", min_value=0.0, max_value=30.0, value=0.0, step=0.5)
+        with a3:
+            notas = st.text_input("Observaciones en PDF", placeholder="Ej. Entrega en planta baja, pago contra entrega...")
 
     subtotal_bruto = sum(x["cantidad"] * x["precio_unit"] for x in st.session_state["carrito_ligeros"])
     ahorro_vol = sum(max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"]) for x in st.session_state["carrito_ligeros"])
     desc_adicional = subtotal_bruto * (desc_extra_pct / 100.0)
     base_neta = subtotal_bruto - desc_adicional + flete
 
-    if precios_incluyen_iva:
+    if PRECIOS_INCLUYEN_IVA:
         total_calc = base_neta
         sub_calc = total_calc / 1.16
         iva_calc = total_calc - sub_calc
@@ -716,6 +707,8 @@ if st.session_state["carrito_ligeros"]:
     k3.metric("Ahorro por Volumen", f"${ahorro_vol:,.2f}")
     k4.metric("TOTAL MXN", f"${total_calc:,.2f}")
 
+    enviar_correo_chk = st.checkbox("📧 Enviar copia PDF por correo", value=False)
+
     if st.button("📄 GENERAR COTIZACIÓN PDF Y GUARDAR EN DRIVE", type="primary", use_container_width=True):
         with st.spinner("Generando folio, registrando en Google Sheets y ensamblando PDF..."):
             doc = conectar_sheets()
@@ -726,7 +719,7 @@ if st.session_state["carrito_ligeros"]:
             pdf_bytes, tot_pdf, sub_pdf, iva_pdf, ahorr_pdf = generar_pdf_mostrador(
                 folio_actual, sucursal_sel, suc_info_activa, cliente_final, telefono,
                 correo_cli, asesor, fecha_validez, st.session_state["carrito_ligeros"],
-                flete, desc_extra_pct, precios_incluyen_iva, notas
+                flete, desc_extra_pct, PRECIOS_INCLUYEN_IVA, notas
             )
 
             # Guardar en las 13 columnas de la pestaña Cotizaciones
@@ -741,7 +734,7 @@ if st.session_state["carrito_ligeros"]:
                         "partidas": st.session_state["carrito_ligeros"],
                         "flete": flete,
                         "desc_extra_pct": desc_extra_pct,
-                        "precios_incluyen_iva": precios_incluyen_iva,
+                        "precios_incluyen_iva": PRECIOS_INCLUYEN_IVA,
                         "notas": notas,
                         "correo_cliente": correo_cli,
                         "vigencia": fecha_validez.strftime("%d/%m/%Y")
