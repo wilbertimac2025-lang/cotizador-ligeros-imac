@@ -1,11 +1,14 @@
 import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
-import datetime
-import json
 import os
-import unicodedata
 from PIL import Image
+from config_imac import (
+    CONFIG_SUCURSALES,
+    conectar_sheets_con_estado,
+    registrar_bitacora,
+    normalizar_texto,
+    resolver_sucursal_clave,
+    extraer_campo_flexible,
+)
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 icono_nav = "logo_imac_2026.png" if os.path.exists("logo_imac_2026.png") else "🏢"
@@ -14,162 +17,6 @@ st.set_page_config(
     page_icon=icono_nav,
     layout="centered"
 )
-
-# --- PERFILES MAESTROS DE LAS 6 SUCURSALES DE VERACRUZ ---
-# Sucursal IMAC (Matriz) ya cargada con los datos reales de tu formato oficial.
-# Las otras 5 sucursales quedan listas para actualizar sus datos fiscales/bancarios aquí.
-CONFIG_SUCURSALES = {
-    "IMAC": {
-        "nombre_oficial": "IMAC DE VERACRUZ S.A. DE C.V. - SUCURSAL MATRIZ",
-        "sucursal_corta": "Sucursal Matriz",
-        "razon_social": "IMAC DE VERACRUZ S.A. DE C.V.",
-        "rfc": "IVE840928BS5",
-        "direccion": "Boulevard Miguel Alemán 759, Col. Centro, Veracruz, Ver. C.P. 91700",
-        "telefono": "(229) 9 35 39 40",
-        "correo": "ventas@grupo-imac.com",
-        "banco": "BBVA",
-        "cuenta": "0134508394",
-        "clabe": "012905001345083942",
-        "leyenda_entrega": "Precios de contado Libre Abordo Veracruz, Ver.",
-        "prefijo_folio": "IMAC"
-    },
-    "EJÉRCITO": {
-        "nombre_oficial": "GRUPO IMAC - SUCURSAL EJÉRCITO MEXICANO",
-        "sucursal_corta": "Sucursal Ejército",
-        "razon_social": "IMAC DE VERACRUZ S.A. DE C.V.",
-        "rfc": "PENDIENTE",
-        "direccion": "AV. EJÉRCITO MEXICANO, BOCA DEL RÍO, VER.",
-        "telefono": "POR DEFINIR",
-        "correo": "ejercito@grupo-imac.com",
-        "banco": "POR DEFINIR",
-        "cuenta": "POR DEFINIR",
-        "clabe": "POR DEFINIR",
-        "leyenda_entrega": "Precios de contado Libre Abordo Boca del Río, Ver.",
-        "prefijo_folio": "EJER"
-    },
-    "BOCA DEL RÍO": {
-        "nombre_oficial": "GRUPO IMAC - SUCURSAL BOCA DEL RÍO",
-        "sucursal_corta": "Sucursal Boca del Río",
-        "razon_social": "IMAC DE VERACRUZ S.A. DE C.V.",
-        "rfc": "PENDIENTE",
-        "direccion": "BLVD. MIGUEL ALEMÁN #306, COL. CENTRO, BOCA DEL RÍO, VER.",
-        "telefono": "(229) 935 4525",
-        "correo": "boca@grupo-imac.com",
-        "banco": "POR DEFINIR",
-        "cuenta": "POR DEFINIR",
-        "clabe": "POR DEFINIR",
-        "leyenda_entrega": "Precios de contado Libre Abordo Boca del Río, Ver.",
-        "prefijo_folio": "BOCA"
-    },
-    "RIVIERA": {
-        "nombre_oficial": "GRUPO IMAC - SUCURSAL RIVIERA VERACRUZANA",
-        "sucursal_corta": "Sucursal Riviera",
-        "razon_social": "IMAC DE VERACRUZ S.A. DE C.V.",
-        "rfc": "PENDIENTE",
-        "direccion": "ZONA RIVIERA VERACRUZANA, ALVARADO / BOCA DEL RÍO, VER.",
-        "telefono": "POR DEFINIR",
-        "correo": "riviera@grupo-imac.com",
-        "banco": "POR DEFINIR",
-        "cuenta": "POR DEFINIR",
-        "clabe": "POR DEFINIR",
-        "leyenda_entrega": "Precios de contado Libre Abordo Riviera Veracruzana, Ver.",
-        "prefijo_folio": "RIV"
-    },
-    "FRAMBOYANES": {
-        "nombre_oficial": "GRUPO IMAC - SUCURSAL FRAMBOYANES",
-        "sucursal_corta": "Sucursal Framboyanes",
-        "razon_social": "IMAC DE VERACRUZ S.A. DE C.V.",
-        "rfc": "PENDIENTE",
-        "direccion": "ZONA PLAZA FRAMBOYANES, VERACRUZ, VER.",
-        "telefono": "POR DEFINIR",
-        "correo": "framboyanes@grupo-imac.com",
-        "banco": "POR DEFINIR",
-        "cuenta": "POR DEFINIR",
-        "clabe": "POR DEFINIR",
-        "leyenda_entrega": "Precios de contado Libre Abordo Veracruz, Ver.",
-        "prefijo_folio": "FRAM"
-    },
-    "IMACRIL CENTRO": {
-        "nombre_oficial": "IMACRIL - SUCURSAL CENTRO 5 DE MAYO",
-        "sucursal_corta": "Sucursal IMACRIL Centro",
-        "razon_social": "IMACRIL S.A. DE C.V.",
-        "rfc": "PENDIENTE",
-        "direccion": "AV. 5 DE MAYO, COL. CENTRO, VERACRUZ, VER.",
-        "telefono": "POR DEFINIR",
-        "correo": "centro@grupo-imac.com",
-        "banco": "POR DEFINIR",
-        "cuenta": "POR DEFINIR",
-        "clabe": "POR DEFINIR",
-        "leyenda_entrega": "Precios de contado Libre Abordo Veracruz, Ver.",
-        "prefijo_folio": "CENT"
-    }
-}
-
-def normalizar_texto(texto):
-    s = str(texto or "").strip().lower()
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
-def resolver_sucursal_clave(sucursal_raw):
-    objetivo = normalizar_texto(sucursal_raw)
-    if objetivo == "todas":
-        return "TODAS"
-    for clave in CONFIG_SUCURSALES.keys():
-        if normalizar_texto(clave) == objetivo:
-            return clave
-    return "IMAC"
-
-def extraer_campo_flexible(fila_norm, posibles_claves, default=""):
-    for k in posibles_claves:
-        if k in fila_norm and fila_norm[k]:
-            return fila_norm[k]
-    for k_real, val in fila_norm.items():
-        if val and any(p in k_real for p in posibles_claves):
-            return val
-    return default
-
-def obtener_secreto(clave):
-    valor = os.environ.get(clave)
-    if valor:
-        return valor
-    try:
-        return st.secrets[clave]
-    except Exception:
-        return None
-
-@st.cache_resource
-def conectar_sheets():
-    try:
-        credenciales_raw = obtener_secreto("GOOGLE_CREDENTIALS")
-        id_excel = obtener_secreto("ID_EXCEL")
-        if not credenciales_raw or not id_excel:
-            return None, "Faltan variables GOOGLE_CREDENTIALS o ID_EXCEL en Streamlit Secrets."
-
-        if isinstance(credenciales_raw, str):
-            credenciales_dic = json.loads(credenciales_raw)
-        else:
-            credenciales_dic = dict(credenciales_raw)
-
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-        creds = Credentials.from_service_account_info(credenciales_dic, scopes=scopes)
-        cliente = gspread.authorize(creds)
-        doc = cliente.open_by_key(id_excel)
-        return doc, "OK"
-    except Exception as e:
-        return None, str(e)
-
-def registrar_bitacora(doc, modulo, accion):
-    try:
-        if doc:
-            hoja_bit = doc.worksheet("Bitacora_Movimientos")
-            fecha_hora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            usuario = st.session_state.get("usuario", "Sistema")
-            rol = st.session_state.get("role", "Desconocido")
-            hoja_bit.append_row([fecha_hora, usuario, rol, modulo, accion])
-    except Exception:
-        pass
 
 def validar_usuario(doc, user_input, pass_input):
     try:
@@ -198,14 +45,13 @@ def validar_usuario(doc, user_input, pass_input):
                     ["correo_asesor", "correo", "email", "mail"],
                     default=""
                 )
-                perfil = {
+                return True, {
                     "rol": rol,
                     "sucursal": sucursal,
                     "nombre_asesor": nombre_asesor,
                     "telefono_asesor": telefono_asesor,
                     "correo_asesor": correo_asesor
                 }
-                return True, perfil
         return False, None
     except Exception as e:
         st.error(f"⚠️ Error al leer la pestaña 'Usuarios': {e}")
@@ -226,16 +72,11 @@ for k_def, v_def in defaults_sesion.items():
     if k_def not in st.session_state:
         st.session_state[k_def] = v_def
 
-# Compartimos la configuración maestra de sucursales con las páginas en pages/
-st.session_state["config_sucursales"] = CONFIG_SUCURSALES
-
 # --- ENCABEZADO VISUAL ---
 col_l, col_t = st.columns([1, 4])
 with col_l:
     if os.path.exists("logo_imac_2026.png"):
         st.image(Image.open("logo_imac_2026.png"), use_container_width=True)
-    elif os.path.exists("logo_tarc.png"):
-        st.image(Image.open("logo_tarc.png"), use_container_width=True)
     else:
         st.markdown("### 🏢 IMAC")
 with col_t:
@@ -244,7 +85,7 @@ with col_t:
 
 st.markdown("---")
 
-doc, estado_conexion = conectar_sheets()
+doc, estado_conexion = conectar_sheets_con_estado()
 
 # ==========================================
 # 🔐 PANTALLA DE INICIO DE SESIÓN
@@ -307,7 +148,6 @@ else:
 
     suc_info = CONFIG_SUCURSALES[st.session_state["sucursal_activa"]]
 
-    # Diagnóstico de pestañas
     st.markdown("### 📡 Estado de la Base de Datos")
     pestanas_req = ["Usuarios", "Cotizaciones", "Bitacora_Movimientos"]
     cols_diag = st.columns(3)
@@ -318,14 +158,12 @@ else:
         except Exception:
             cols_diag[idx_p].metric(nombre_p, "Falta", "Revisar", delta_color="inverse")
 
-    # Perfil del Asesor (jalado automáticamente de la pestaña Usuarios)
     st.markdown("### 👤 Datos del Asesor (Cargados desde `Usuarios`)")
     a1, a2, a3 = st.columns(3)
     a1.write(f"**Nombre en PDF:** {st.session_state['nombre_asesor'] or 'Sin capturar'}")
     a2.write(f"**Teléfono:** {st.session_state['telefono_asesor'] or 'Sin capturar'}")
     a3.write(f"**Correo:** {st.session_state['correo_asesor'] or 'Sin capturar'}")
 
-    # Perfil Fiscal y Bancario de la Sucursal Activa
     st.markdown("### 🏦 Perfil Fiscal y Bancario de la Sucursal Activa")
     c1, c2 = st.columns(2)
     with c1:
