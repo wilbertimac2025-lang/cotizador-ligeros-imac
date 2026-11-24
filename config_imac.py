@@ -3,6 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from fpdf import FPDF
 import datetime
+from zoneinfo import ZoneInfo
 import json
 import os
 import smtplib
@@ -14,6 +15,14 @@ MIN_PZAS_NIVEL_2 = 50
 MIN_PZAS_NIVEL_3 = 60
 MAX_DESC_PCT = 10.0  # Límite máximo permitido de descuento (10%)
 PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
+
+# --- ZONA HORARIA LOCAL (VERACRUZ / MÉXICO CENTRO) ---
+def ahora_mx():
+    """Devuelve fecha y hora local de Veracruz/México (corrige el desfase +6h UTC de Streamlit Cloud)."""
+    try:
+        return datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+    except Exception:
+        return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-6)))
 
 # --- PERFILES FISCALES Y BANCARIOS REALES DE LAS 6 SUCURSALES DE VERACRUZ ---
 # 3 Razones Sociales independientes:
@@ -203,7 +212,6 @@ def resolver_sucursal_clave(sucursal_raw):
         return "IMAC"
     if any(p in obj for p in ["todas", "all", "general"]):
         return "TODAS"
-    # Validar primero las que contienen o se parecen a 'imac' para evitar caer por error en IMAC Matriz
     if any(p in obj for p in ["imacril", "centro", "5 de mayo"]):
         return "IMACRIL CENTRO"
     if any(p in obj for p in ["riviera", "playa dorada", "alvarado"]):
@@ -226,6 +234,12 @@ def extraer_campo_flexible(fila_norm, posibles_claves, default=""):
         if val and any(p in k_real for p in posibles_claves):
             return val
     return default
+
+def buscar_imagen(nombres_posibles):
+    for nombre in nombres_posibles:
+        if os.path.exists(nombre):
+            return nombre
+    return None
 
 # --- CONEXIÓN GOOGLE SHEETS Y BITÁCORA ---
 def obtener_secreto(clave):
@@ -263,7 +277,7 @@ def registrar_bitacora(doc, modulo, accion):
     try:
         if doc:
             hoja_bit = doc.worksheet("Bitacora_Movimientos")
-            fecha_hora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            fecha_hora = ahora_mx().strftime("%d/%m/%Y %H:%M:%S")
             usuario = st.session_state.get("usuario", "Sistema")
             rol = st.session_state.get("role", "Desconocido")
             hoja_bit.append_row([fecha_hora, usuario, rol, modulo, accion])
@@ -271,7 +285,7 @@ def registrar_bitacora(doc, modulo, accion):
         pass
 
 def obtener_nuevo_folio(doc, prefijo):
-    anio = datetime.datetime.now().strftime("%y")
+    anio = ahora_mx().strftime("%y")
     try:
         if doc:
             hoja = doc.worksheet("Cotizaciones")
@@ -280,7 +294,7 @@ def obtener_nuevo_folio(doc, prefijo):
             return f"LIG-{prefijo}-{consecutivo:04d}-{anio}"
     except Exception:
         pass
-    return f"LIG-{prefijo}-{datetime.datetime.now().strftime('%H%M')}-{anio}"
+    return f"LIG-{prefijo}-{ahora_mx().strftime('%H%M')}-{anio}"
 
 def limpiar_monto(valor):
     if valor is None or str(valor).strip() == "":
@@ -346,7 +360,7 @@ def enviar_respaldo_correo(pdf_bytes, nombre_archivo, folio, sucursal_nombre, cl
     except Exception as e:
         return False, str(e)
 
-# --- CÁLCULOS DE PRECIOS Y TOTALES ---
+# --- CÁLCULOS DE PRECIOS Y TOTALES (PRECIO NETO CUADRADO AL CENTAVO) ---
 def calcular_nivel_y_precio(clave, cantidad, precio_fallback=0.0):
     if clave in CATALOGO_LIGEROS:
         item = CATALOGO_LIGEROS[clave]
@@ -360,44 +374,65 @@ def calcular_nivel_y_precio(clave, cantidad, precio_fallback=0.0):
 def calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iva):
     subtotal_bruto = 0.0
     total_desc_partidas = 0.0
+    desc_global_monto = 0.0
+    subtotal_neto_partidas = 0.0
     ahorro_nivel = 0.0
     desc_global_seguro = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
+    partidas_netas = []
 
     for x in carrito:
-        imp_bruto = x["cantidad"] * x["precio_unit"]
-        desc_p = min(max(0.0, float(x.get("desc_pct", 0.0))), MAX_DESC_PCT) if x["nivel"] == "NIVEL 1" else 0.0
-        desc_monto = imp_bruto * (desc_p / 100.0)
-        subtotal_bruto += imp_bruto
-        total_desc_partidas += desc_monto
-        ahorro_nivel += max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"])
+        cant = float(x["cantidad"])
+        pu_base = float(x["precio_unit"])
+        imp_bruto = cant * pu_base
 
-    subtotal_post_partidas = subtotal_bruto - total_desc_partidas
-    desc_global_monto = subtotal_post_partidas * (desc_global_seguro / 100.0)
-    base_neta = subtotal_post_partidas - desc_global_monto + flete
+        desc_p = min(max(0.0, float(x.get("desc_pct", 0.0))), MAX_DESC_PCT) if x.get("nivel") == "NIVEL 1" else 0.0
+        pu_post_n1 = pu_base * (1.0 - desc_p / 100.0)
+        pu_neto = round(pu_post_n1 * (1.0 - desc_global_seguro / 100.0), 2)
+        imp_neto = round(cant * pu_neto, 2)
+
+        desc_n1_m = imp_bruto - (cant * pu_post_n1)
+        desc_glob_m = (cant * pu_post_n1) - imp_neto
+
+        subtotal_bruto += imp_bruto
+        total_desc_partidas += max(0.0, desc_n1_m)
+        desc_global_monto += max(0.0, desc_glob_m)
+        subtotal_neto_partidas += imp_neto
+        ahorro_nivel += max(0.0, (float(x.get("precio_lista", pu_base)) - pu_base) * cant)
+
+        partidas_netas.append({
+            "clave": str(x["clave"]),
+            "producto": str(x["producto"]),
+            "cantidad": cant,
+            "pu_neto": pu_neto,
+            "imp_neto": imp_neto
+        })
+
+    base_neta = round(subtotal_neto_partidas + float(flete), 2)
 
     if precios_incluyen_iva:
         total_final = base_neta
-        subtotal_sin_iva = total_final / 1.16
-        iva_monto = total_final - subtotal_sin_iva
+        subtotal_sin_iva = round(total_final / 1.16, 2)
+        iva_monto = round(total_final - subtotal_sin_iva, 2)
     else:
         subtotal_sin_iva = base_neta
-        iva_monto = subtotal_sin_iva * 0.16
-        total_final = subtotal_sin_iva + iva_monto
+        iva_monto = round(subtotal_sin_iva * 0.16, 2)
+        total_final = round(subtotal_sin_iva + iva_monto, 2)
 
     return {
-        "subtotal_bruto": subtotal_bruto,
-        "total_desc_partidas": total_desc_partidas,
-        "desc_global_monto": desc_global_monto,
-        "ahorro_nivel": ahorro_nivel,
+        "subtotal_bruto": round(subtotal_bruto, 2),
+        "total_desc_partidas": round(total_desc_partidas, 2),
+        "desc_global_monto": round(desc_global_monto, 2),
+        "ahorro_nivel": round(ahorro_nivel, 2),
         "subtotal_sin_iva": subtotal_sin_iva,
         "iva_monto": iva_monto,
-        "total_final": total_final
+        "total_final": total_final,
+        "partidas_netas": partidas_netas
     }
 
 def limpiar_pdf_txt(texto):
     return str(texto).encode("latin-1", "replace").decode("latin-1")
 
-# --- GENERADOR PDF OFICIAL PERSONALIZADO POR SUCURSAL Y ASESOR (SIN N1/N2/N3) ---
+# --- GENERADOR PDF CORPORATIVO CUADRADO AL MILÍMETRO (SIN N1/N2/N3 NI % DE DESCUENTO) ---
 class PDFCorporativoIMAC(FPDF):
     def __init__(self, suc_info, folio_txt, fecha_hora_txt):
         super().__init__()
@@ -406,49 +441,64 @@ class PDFCorporativoIMAC(FPDF):
         self.fecha_hora_txt = fecha_hora_txt
 
     def header(self):
-        # Franja superior azul corporativo
+        # 1. Franja superior azul corporativo (y = 0..3 mm)
         self.set_fill_color(15, 60, 140)
-        self.rect(0, 0, 210, 4, "F")
+        self.rect(0, 0, 210, 3, "F")
 
-        # Izquierda: Logo IMAC 2026
-        if os.path.exists("logo_imac_2026.png"):
-            self.image("logo_imac_2026.png", x=10, y=7, w=30)
+        # 2. Logo IMAC 2026 cuadrado (720x720 -> 20x20 mm en x=10..30, y=6..26)
+        img_imac = buscar_imagen(["logo_imac_2026.png", "logo_imac_2026.jpg", "logo_imac.png"])
+        if img_imac:
+            self.image(img_imac, x=10, y=6, w=20, h=20)
 
-        # Derecha: Espacio listo para Logo Master Lasser (aparece automático si lo subes)
-        if os.path.exists("logo_master_lasser.png"):
-            self.image("logo_master_lasser.png", x=165, y=7, w=34)
-        elif os.path.exists("logo_master_lasser.jpg"):
-            self.image("logo_master_lasser.jpg", x=165, y=7, w=34)
+        # 3. Logo Master Lasser (302x62 -> 48x9.85 mm en x=152..200, y=10.5..20.35)
+        img_ml = buscar_imagen(["logo_master_lasser.png", "logo_master_lasser.jpg", "logo_master_lasser.jpeg"])
+        if img_ml:
+            self.image(img_ml, x=152, y=10.5, w=48)
 
-        # Centro: Razón Social EXACTA de la sucursal (IMAC DE VERACRUZ / IMACRIL / TARC)
-        self.set_xy(42, 8)
+        # 4. Encabezado Central (x=33..149 -> 116 mm sin tocar ningún logo)
+        self.set_xy(33, 8)
         self.set_font("Arial", "B", 13)
         self.set_text_color(15, 60, 140)
-        self.cell(122, 6, limpiar_pdf_txt(self.suc_info["razon_social"]), ln=True, align="C")
+        self.cell(116, 6, limpiar_pdf_txt(self.suc_info["razon_social"]), ln=True, align="C")
 
-        self.set_x(42)
+        self.set_x(33)
         self.set_font("Arial", "B", 8.5)
         self.set_text_color(0, 140, 230)
-        self.cell(122, 4.5, limpiar_pdf_txt(f"{self.suc_info['sucursal_corta'].upper()}  |  COTIZACION DE MATERIALES"), ln=True, align="C")
+        self.cell(116, 4.8, limpiar_pdf_txt(self.suc_info["sucursal_corta"].upper()), ln=True, align="C")
 
-        # Folio y fecha/hora debajo del bloque superior
-        self.set_xy(10, 24)
+        self.set_x(33)
+        self.set_font("Arial", "", 7.5)
+        self.set_text_color(95, 95, 95)
+        self.cell(116, 4.2, "COTIZACION DE MATERIALES | SISTEMAS LIGEROS", ln=True, align="C")
+
+        # 5. Barra de metadatos debajo del logo IMAC (y = 28.5..34.0 mm, cero colisiones)
+        self.set_xy(10, 28.5)
         self.set_font("Arial", "B", 9)
         self.set_text_color(200, 30, 30)
         self.cell(95, 5, limpiar_pdf_txt(f"FOLIO: {self.folio_txt}"), ln=False, align="L")
 
-        self.set_font("Arial", "I", 8.5)
-        self.set_text_color(85, 85, 85)
-        self.cell(95, 5, limpiar_pdf_txt(f"Fecha: {self.fecha_hora_txt}"), ln=True, align="R")
+        self.set_font("Arial", "B", 8.5)
+        self.set_text_color(60, 60, 60)
+        self.cell(95, 5, limpiar_pdf_txt(f"Fecha y Hora: {self.fecha_hora_txt}"), ln=True, align="R")
 
-        self.set_draw_color(210, 220, 235)
-        self.line(10, 30, 200, 30)
-        self.set_y(33)
+        # 6. Línea divisoria (y = 35 mm) y arranque seguro del contenido (y = 38 mm)
+        self.set_draw_color(200, 212, 230)
+        self.line(10, 35, 200, 35)
+        self.set_y(38)
 
     def footer(self):
-        # Franja opcional de marcas si ya existe footer_marcas.png en GitHub
-        if os.path.exists("footer_marcas.png"):
-            self.image("footer_marcas.png", x=10, y=274, w=190)
+        # Footer gráfico oficial (1051x232 -> 190x41.94 mm en y=250..291.94 mm)
+        img_footer = buscar_imagen(["footer_marcas.png", "footer_marcas.jpg", "footer_marcas.jpeg"])
+        if img_footer:
+            self.image(img_footer, x=10, y=250, w=190)
+            self.set_xy(10, 292.2)
+            self.set_font("Arial", "I", 6.8)
+            self.set_text_color(130, 130, 130)
+            self.cell(
+                190, 3.5,
+                limpiar_pdf_txt(f"{self.suc_info['razon_social']} - {self.suc_info['sucursal_corta']} | Pagina {self.page_no()}"),
+                align="R"
+            )
         else:
             self.set_y(-19)
             self.set_draw_color(215, 222, 232)
@@ -482,118 +532,95 @@ def generar_pdf_mostrador(
     notas,
     mostrar_col_desc=False
 ):
-    fecha_hora = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+    # Hora local de Veracruz / México (formato 24h con hrs)
+    fecha_hora = ahora_mx().strftime("%d/%m/%Y %H:%M hrs")
     pdf = PDFCorporativoIMAC(suc_info, folio, fecha_hora)
-    pdf.set_auto_page_break(auto=True, margin=26)
+    # Margen inferior 52 mm -> salto automático a los 245 mm (5 mm seguros arriba del footer en y=250)
+    pdf.set_auto_page_break(auto=True, margin=52)
     pdf.add_page()
 
-    desc_extra_pct = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
-    tiene_desc_individual = mostrar_col_desc or any(
-        (float(r.get("desc_pct", 0.0)) > 0 and r.get("nivel") == "NIVEL 1") for r in carrito
-    )
+    # Calcular totales netos (los descuentos se integran de forma invisible al precio unitario)
+    tot = calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iva)
 
-    # Bloque "En atención a:"
+    # --- TARJETA DEL CLIENTE (y = 38..57.5 mm) ---
     y_att = pdf.get_y()
     pdf.set_fill_color(245, 247, 250)
-    pdf.rect(10, y_att, 190, 18, "F")
+    pdf.rect(10, y_att, 190, 19.5, "F")
     pdf.set_fill_color(15, 60, 140)
-    pdf.rect(10, y_att, 2.5, 18, "F")
+    pdf.rect(10, y_att, 2.5, 19.5, "F")
 
-    pdf.set_xy(15, y_att + 2.5)
+    pdf.set_xy(15, y_att + 2.8)
     pdf.set_font("Arial", "B", 8)
     pdf.set_text_color(15, 60, 140)
-    pdf.cell(28, 4.5, "En atencion a:", ln=False)
+    pdf.cell(26, 4.8, "En atencion a:", ln=False)
     pdf.set_font("Arial", "B", 9.5)
     pdf.set_text_color(30, 30, 30)
-    pdf.cell(150, 4.5, limpiar_pdf_txt(cliente.upper() if cliente else "MOSTRADOR / PUBLICO EN GENERAL"), ln=True)
+    pdf.cell(154, 4.8, limpiar_pdf_txt(cliente.upper() if cliente else "MOSTRADOR / PUBLICO EN GENERAL"), ln=True)
 
     pdf.set_x(15)
     pdf.set_font("Arial", "", 7.8)
-    pdf.set_text_color(85, 85, 85)
+    pdf.set_text_color(80, 80, 80)
     det_cli = f"Tel: {telefono_cli if telefono_cli else 'N/A'}   |   Correo: {correo_cli if correo_cli else 'N/A'}   |   Vigencia: {validez.strftime('%d/%m/%Y')}   |   Moneda: MXN"
-    pdf.cell(180, 4.5, limpiar_pdf_txt(det_cli), ln=True)
+    pdf.cell(180, 4.6, limpiar_pdf_txt(det_cli), ln=True)
 
     pdf.set_x(15)
-    pdf.set_font("Arial", "B", 7.5)
+    pdf.set_font("Arial", "B", 7.6)
     pdf.set_text_color(0, 130, 215)
-    pdf.cell(180, 4, limpiar_pdf_txt(f"Atendido por: {asesor_nombre} ({suc_info['sucursal_corta']})"), ln=True)
+    pdf.cell(180, 4.4, limpiar_pdf_txt(f"Atendido por: {asesor_nombre} ({suc_info['sucursal_corta']})"), ln=True)
 
-    pdf.set_y(y_att + 22)
+    pdf.set_y(y_att + 23.5)
 
-    # Tabla de partidas (100% libre de N1/N2/N3, suma exacta = 190 mm)
+    # --- TABLA DE PARTIDAS LIMPIA (6 COLUMNAS, 190 mm EXACTOS, CERO % Y CERO NIVELES) ---
     def dibujar_encabezado_tabla():
         pdf.set_fill_color(15, 60, 140)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Arial", "B", 7.8)
-        if tiene_desc_individual:
-            pdf.cell(14, 7, "CANT.", 0, 0, "C", True)
-            pdf.cell(13, 7, "UNID.", 0, 0, "C", True)
-            pdf.cell(24, 7, "CLAVE", 0, 0, "C", True)
-            pdf.cell(77, 7, "DESCRIPCION", 0, 0, "L", True)
-            pdf.cell(14, 7, "DESC.", 0, 0, "C", True)
-            pdf.cell(23, 7, "P. UNITARIO", 0, 0, "R", True)
-            pdf.cell(25, 7, "IMPORTE", 0, 1, "R", True)
-        else:
-            pdf.cell(15, 7, "CANT.", 0, 0, "C", True)
-            pdf.cell(13, 7, "UNID.", 0, 0, "C", True)
-            pdf.cell(25, 7, "CLAVE", 0, 0, "C", True)
-            pdf.cell(89, 7, "DESCRIPCION", 0, 0, "L", True)
-            pdf.cell(23, 7, "P. UNITARIO", 0, 0, "R", True)
-            pdf.cell(25, 7, "IMPORTE", 0, 1, "R", True)
+        pdf.set_font("Arial", "B", 8)
+        pdf.cell(16, 7.2, "CANT.", 0, 0, "C", True)
+        pdf.cell(14, 7.2, "UNID.", 0, 0, "C", True)
+        pdf.cell(27, 7.2, "CLAVE", 0, 0, "C", True)
+        pdf.cell(83, 7.2, "DESCRIPCION", 0, 0, "L", True)
+        pdf.cell(25, 7.2, "P. UNITARIO", 0, 0, "R", True)
+        pdf.cell(25, 7.2, "IMPORTE", 0, 1, "R", True)
 
     dibujar_encabezado_tabla()
 
-    for idx, row in enumerate(carrito):
-        if pdf.get_y() > 246:
+    for idx, row in enumerate(tot["partidas_netas"]):
+        if pdf.get_y() > 236:
             pdf.add_page()
             dibujar_encabezado_tabla()
 
         fill = (idx % 2 == 1)
         pdf.set_fill_color(246, 249, 253)
-        pdf.set_draw_color(225, 230, 238)
+        pdf.set_draw_color(222, 228, 238)
         pdf.set_text_color(30, 30, 30)
-        pdf.set_font("Arial", "", 7.4)
+        pdf.set_font("Arial", "", 7.6)
 
-        clave_r = str(row["clave"])
+        clave_r = row["clave"]
         unidad_r = CATALOGO_LIGEROS.get(clave_r, {}).get("unidad", "PZA")
-        desc_p_pct = min(max(0.0, float(row.get("desc_pct", 0.0))), MAX_DESC_PCT) if row.get("nivel") == "NIVEL 1" else 0.0
-        importe_bruto = row["cantidad"] * row["precio_unit"]
-        importe_neto = importe_bruto * (1.0 - desc_p_pct / 100.0)
 
-        if tiene_desc_individual:
-            desc_txt = f"{desc_p_pct:.1f}%" if desc_p_pct > 0 else "-"
-            pdf.cell(14, 6.3, f"{row['cantidad']:g}", "B", 0, "C", fill)
-            pdf.cell(13, 6.3, unidad_r, "B", 0, "C", fill)
-            pdf.cell(24, 6.3, limpiar_pdf_txt(clave_r[:13]), "B", 0, "C", fill)
-            pdf.cell(77, 6.3, limpiar_pdf_txt(row["producto"][:46]), "B", 0, "L", fill)
-            pdf.cell(14, 6.3, desc_txt, "B", 0, "C", fill)
-            pdf.cell(23, 6.3, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
-            pdf.cell(25, 6.3, f"${importe_neto:,.2f}", "B", 1, "R", fill)
-        else:
-            pdf.cell(15, 6.3, f"{row['cantidad']:g}", "B", 0, "C", fill)
-            pdf.cell(13, 6.3, unidad_r, "B", 0, "C", fill)
-            pdf.cell(25, 6.3, limpiar_pdf_txt(clave_r[:14]), "B", 0, "C", fill)
-            pdf.cell(89, 6.3, limpiar_pdf_txt(row["producto"][:53]), "B", 0, "L", fill)
-            pdf.cell(23, 6.3, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
-            pdf.cell(25, 6.3, f"${importe_neto:,.2f}", "B", 1, "R", fill)
+        pdf.cell(16, 6.5, f"{row['cantidad']:g}", "B", 0, "C", fill)
+        pdf.cell(14, 6.5, unidad_r, "B", 0, "C", fill)
+        pdf.cell(27, 6.5, limpiar_pdf_txt(clave_r[:15]), "B", 0, "C", fill)
+        pdf.cell(83, 6.5, limpiar_pdf_txt(row["producto"][:49]), "B", 0, "L", fill)
+        pdf.cell(25, 6.5, f"${row['pu_neto']:,.2f}", "B", 0, "R", fill)
+        pdf.cell(25, 6.5, f"${row['imp_neto']:,.2f}", "B", 1, "R", fill)
 
-    tot = calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iva)
-
-    if pdf.get_y() > 175:
+    # --- BLOQUE DE CONDICIONES (IZQUIERDA) + SUMATORIA LIMPIA (DERECHA) ---
+    if pdf.get_y() > 172:
         pdf.add_page()
 
-    pdf.ln(4)
+    pdf.ln(5)
     y_resumen = pdf.get_y()
 
-    # Columna izquierda: Observaciones + Leyendas comerciales oficiales
+    # Izquierda: Observaciones y Condiciones (x = 10..116, ancho 106 mm)
     pdf.set_xy(10, y_resumen)
-    pdf.set_font("Arial", "B", 8)
+    pdf.set_font("Arial", "B", 8.2)
     pdf.set_text_color(15, 60, 140)
-    pdf.cell(105, 4.5, "Observaciones y Condiciones:", ln=True)
-    pdf.set_x(10)
-    pdf.set_font("Arial", "", 7.5)
-    pdf.set_text_color(60, 60, 60)
+    pdf.cell(106, 4.8, "Observaciones y Condiciones:", ln=True)
 
+    pdf.set_x(10)
+    pdf.set_font("Arial", "", 7.6)
+    pdf.set_text_color(60, 60, 60)
     lineas_leyenda = []
     if notas.strip():
         lineas_leyenda.append(f"Nota: {notas.strip()}")
@@ -603,77 +630,58 @@ def generar_pdf_mostrador(
     if suc_info.get("leyenda_extra"):
         lineas_leyenda.append(f"- {suc_info['leyenda_extra']}")
     lineas_leyenda.append("- Cotizacion sujeta a cambios sin previo aviso")
-    pdf.multi_cell(105, 3.8, limpiar_pdf_txt("\n".join(lineas_leyenda)))
+    pdf.multi_cell(106, 4.0, limpiar_pdf_txt("\n".join(lineas_leyenda)))
     y_fin_izq = pdf.get_y()
 
-    # Columna derecha: Desglose financiero
-    pdf.set_xy(120, y_resumen)
-    pdf.set_font("Arial", "B", 8.5)
+    # Derecha: SOLO SUMATORIA FINAL (x = 122..200, ancho 78 mm alineado al borde de la tabla)
+    pdf.set_xy(122, y_resumen)
+    pdf.set_font("Arial", "B", 8.6)
     pdf.set_text_color(55, 55, 55)
 
-    if tot["ahorro_nivel"] > 0:
-        pdf.set_x(120)
-        pdf.set_text_color(0, 130, 70)
-        pdf.cell(42, 5, "AHORRO VOLUMEN:", 0, 0, "R")
-        pdf.cell(38, 5, f"${tot['ahorro_nivel']:,.2f}", 0, 1, "R")
-        pdf.set_text_color(55, 55, 55)
+    if float(flete) > 0:
+        pdf.set_x(122)
+        pdf.cell(40, 5.5, "FLETE / ENVIO:", 0, 0, "R")
+        pdf.cell(38, 5.5, f"${float(flete):,.2f}", 0, 1, "R")
 
-    if tot["total_desc_partidas"] > 0:
-        pdf.set_x(120)
-        pdf.set_text_color(200, 30, 30)
-        pdf.cell(42, 5, "DESC. ESPECIAL:", 0, 0, "R")
-        pdf.cell(38, 5, f"-${tot['total_desc_partidas']:,.2f}", 0, 1, "R")
-        pdf.set_text_color(55, 55, 55)
+    pdf.set_x(122)
+    pdf.cell(40, 5.8, "SUB TOTAL:", 0, 0, "R")
+    pdf.cell(38, 5.8, f"${tot['subtotal_sin_iva']:,.2f}", 0, 1, "R")
 
-    if tot["desc_global_monto"] > 0:
-        pdf.set_x(120)
-        pdf.set_text_color(200, 30, 30)
-        pdf.cell(42, 5, f"DESC. ({desc_extra_pct:.1f}%):", 0, 0, "R")
-        pdf.cell(38, 5, f"-${tot['desc_global_monto']:,.2f}", 0, 1, "R")
-        pdf.set_text_color(55, 55, 55)
+    pdf.set_x(122)
+    pdf.cell(40, 5.8, "IVA (16%):", 0, 0, "R")
+    pdf.cell(38, 5.8, f"${tot['iva_monto']:,.2f}", 0, 1, "R")
 
-    if flete > 0:
-        pdf.set_x(120)
-        pdf.cell(42, 5, "FLETE / ENVIO:", 0, 0, "R")
-        pdf.cell(38, 5, f"${flete:,.2f}", 0, 1, "R")
-
-    pdf.set_x(120)
-    pdf.cell(42, 5.2, "SUB TOTAL:", 0, 0, "R")
-    pdf.cell(38, 5.2, f"${tot['subtotal_sin_iva']:,.2f}", 0, 1, "R")
-
-    pdf.set_x(120)
-    pdf.cell(42, 5.2, "IVA (16%):", 0, 0, "R")
-    pdf.cell(38, 5.2, f"${tot['iva_monto']:,.2f}", 0, 1, "R")
-
-    pdf.ln(1)
+    pdf.ln(1.5)
     y_tot_bar = pdf.get_y()
-    pdf.set_xy(120, y_tot_bar)
+    pdf.set_xy(122, y_tot_bar)
     pdf.set_fill_color(15, 60, 140)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Arial", "B", 10)
-    pdf.cell(34, 8, "TOTAL", 0, 0, "R", True)
+    pdf.cell(32, 8.5, "TOTAL", 0, 0, "R", True)
     pdf.set_fill_color(0, 150, 255)
-    pdf.cell(46, 8, f"${tot['total_final']:,.2f} MXN", 0, 1, "C", True)
+    pdf.cell(46, 8.5, f"${tot['total_final']:,.2f} MXN", 0, 1, "C", True)
     y_fin_der = pdf.get_y()
 
-    # Bloque inferior: Firma personalizada del Asesor (izquierda) + Datos Bancarios BBVA (derecha)
+    # --- BLOQUE DE CIERRE: FIRMA ASESOR (IZQ) + TARJETA BBVA (DER) ---
     y_cierre = max(y_fin_izq, y_fin_der) + 7
-    if y_cierre > 225:
+    # Altura fija de cierre = 38 mm -> si y_cierre > 205 salta de página para NO tocar footer (y=250)
+    if y_cierre > 205:
         pdf.add_page()
-        y_cierre = pdf.get_y() + 4
+        y_cierre = pdf.get_y() + 2
 
+    # Izquierda: Firma del Asesor (x = 10..108, ancho 98 mm)
     pdf.set_xy(10, y_cierre)
     pdf.set_font("Arial", "I", 8)
     pdf.set_text_color(70, 70, 70)
-    pdf.cell(98, 4.5, "Quedamos a sus ordenes para cualquier duda o aclaracion.", ln=True)
+    pdf.cell(98, 4.4, "Quedamos a sus ordenes para cualquier duda o aclaracion.", ln=True)
     pdf.set_x(10)
-    pdf.cell(98, 4.5, "Cordialmente,", ln=True)
-    pdf.ln(1.5)
+    pdf.cell(98, 4.4, "Cordialmente,", ln=True)
+    pdf.ln(1.8)
 
     pdf.set_x(10)
     pdf.set_font("Arial", "B", 9.5)
     pdf.set_text_color(15, 60, 140)
-    pdf.cell(98, 5, limpiar_pdf_txt(asesor_nombre), ln=True)
+    pdf.cell(98, 4.8, limpiar_pdf_txt(asesor_nombre), ln=True)
 
     pdf.set_x(10)
     pdf.set_font("Arial", "B", 8)
@@ -693,28 +701,31 @@ def generar_pdf_mostrador(
     )
     pdf.multi_cell(98, 3.8, limpiar_pdf_txt(info_contacto))
 
-    # Derecha: Tarjeta Bancaria BBVA personalizada de la sucursal
+    # Derecha: Tarjeta Bancaria BBVA (x = 112..200, ancho 88 mm, alto 38 mm)
     pdf.set_fill_color(245, 248, 253)
-    pdf.rect(112, y_cierre, 88, 36, "F")
+    pdf.set_draw_color(218, 226, 238)
+    pdf.rect(112, y_cierre, 88, 38, "DF")
     pdf.set_fill_color(15, 60, 140)
-    pdf.rect(112, y_cierre, 2.5, 36, "F")
+    pdf.rect(112, y_cierre, 2.5, 38, "F")
 
-    if os.path.exists("logo_bbva.png"):
-        pdf.image("logo_bbva.png", x=117, y=y_cierre + 3, w=22)
-        y_txt_bank = y_cierre + 12
+    img_bbva = buscar_imagen(["logo_bbva.png", "logo_bbva.jpg", "logo_bbva.jpeg"])
+    if img_bbva:
+        # 233x69 -> 24x7.11 mm en y_cierre + 3.5..10.61
+        pdf.image(img_bbva, x=117.5, y=y_cierre + 3.5, w=24)
+        y_txt_bank = y_cierre + 13.0
     else:
-        pdf.set_xy(117, y_cierre + 3)
+        pdf.set_xy(117.5, y_cierre + 3.5)
         pdf.set_font("Arial", "B", 11)
         pdf.set_text_color(15, 60, 140)
         pdf.cell(80, 6, limpiar_pdf_txt(suc_info["banco"]), ln=True)
-        y_txt_bank = y_cierre + 10.5
+        y_txt_bank = y_cierre + 11.5
 
-    pdf.set_xy(117, y_txt_bank)
-    pdf.set_font("Arial", "B", 7.8)
-    pdf.set_text_color(40, 40, 40)
-    pdf.cell(80, 4.5, limpiar_pdf_txt(suc_info["razon_social"]), ln=True)
+    pdf.set_xy(117.5, y_txt_bank)
+    pdf.set_font("Arial", "B", 8)
+    pdf.set_text_color(35, 35, 35)
+    pdf.cell(80, 4.6, limpiar_pdf_txt(suc_info["razon_social"]), ln=True)
 
-    pdf.set_x(117)
+    pdf.set_x(117.5)
     pdf.set_font("Arial", "", 8)
     pdf.set_text_color(55, 55, 55)
     bloque_banco = (
@@ -722,7 +733,7 @@ def generar_pdf_mostrador(
         f"CLABE: {suc_info['clabe']}\n"
         f"RFC: {suc_info['rfc']}"
     )
-    pdf.multi_cell(80, 4.6, limpiar_pdf_txt(bloque_banco))
+    pdf.multi_cell(80, 4.8, limpiar_pdf_txt(bloque_banco))
 
     return (
         pdf.output(dest="S").encode("latin-1"),
