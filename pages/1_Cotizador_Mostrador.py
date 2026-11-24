@@ -21,6 +21,7 @@ st.set_page_config(
 # --- REGLAS COMERCIALES INTERNAS (OCULTAS EN PANTALLA PARA TODOS) ---
 MIN_PZAS_NIVEL_2 = 50
 MIN_PZAS_NIVEL_3 = 60
+MAX_DESC_PCT = 10.0  # Límite máximo permitido de descuento adicional (10%)
 PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
 
 # --- CANDADO DE SESIÓN ---
@@ -272,7 +273,7 @@ def calcular_nivel_y_precio(clave, cantidad):
         return "NIVEL 2", item["n2"]
     return "NIVEL 1", item["n1"]
 
-# --- DISEÑO PDF CORPORATIVO MODERNO (OPTIMIZADO PARA logo_imac_2026.png) ---
+# --- DISEÑO PDF CORPORATIVO MODERNO (SIN MOSTRAR N1/N2/N3 AL CLIENTE) ---
 class PDFMostrador(FPDF):
     def __init__(self, suc_nombre, folio_txt, fecha_txt):
         super().__init__()
@@ -332,6 +333,7 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
+    desc_extra_pct = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
     y_cards = pdf.get_y()
 
     # Tarjeta 1: Sucursal Emisora
@@ -385,14 +387,14 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 
     pdf.set_y(y_cards + 42)
 
+    # Encabezado de tabla SIN columna NIVEL (suma exacta = 190mm)
     def dibujar_encabezado_tabla():
         pdf.set_fill_color(15, 60, 140)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Arial", "B", 8)
         pdf.cell(26, 7, "CLAVE", 0, 0, "C", True)
-        pdf.cell(85, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
+        pdf.cell(100, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
         pdf.cell(16, 7, "CANT.", 0, 0, "C", True)
-        pdf.cell(15, 7, "NIVEL", 0, 0, "C", True)
         pdf.cell(23, 7, "P. UNIT.", 0, 0, "R", True)
         pdf.cell(25, 7, "IMPORTE", 0, 1, "R", True)
 
@@ -417,9 +419,8 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
         ahorro_nivel += max(0.0, (row["precio_lista"] - row["precio_unit"]) * row["cantidad"])
 
         pdf.cell(26, 6.5, limpiar_pdf_txt(row["clave"][:14]), "B", 0, "C", fill)
-        pdf.cell(85, 6.5, limpiar_pdf_txt(row["producto"][:49]), "B", 0, "L", fill)
+        pdf.cell(100, 6.5, limpiar_pdf_txt(row["producto"][:58]), "B", 0, "L", fill)
         pdf.cell(16, 6.5, f"{row['cantidad']:g}", "B", 0, "C", fill)
-        pdf.cell(15, 6.5, limpiar_pdf_txt(row["nivel"].replace("NIVEL ", "N")), "B", 0, "C", fill)
         pdf.cell(23, 6.5, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
         pdf.cell(25, 6.5, f"${importe:,.2f}", "B", 1, "R", fill)
 
@@ -587,7 +588,7 @@ if productos_filtrados:
         clave_sel = sel_prod_str.split(" | ")[0]
         info_sel = CATALOGO_LIGEROS[clave_sel]
         st.caption(
-            f"Tabulador MXN — **N1:** ${info_sel['n1']:,.2f} | "
+            f"Tabulador interno MXN — **N1:** ${info_sel['n1']:,.2f} | "
             f"**N2:** ${info_sel['n2']:,.2f} | **N3:** ${info_sel['n3']:,.2f}"
         )
     with p2:
@@ -596,7 +597,7 @@ if productos_filtrados:
         nivel_calc, precio_calc = calcular_nivel_y_precio(clave_sel, cant_sel)
         ahorro_unit = info_sel["n1"] - precio_calc
         delta_txt = f"-${ahorro_unit:,.2f}/u" if ahorro_unit > 0 else "Precio Lista"
-        st.metric(f"{nivel_calc}", f"${precio_calc:,.2f}", delta_txt)
+        st.metric(f"{nivel_calc} (Interno)", f"${precio_calc:,.2f}", delta_txt)
     with p4:
         st.write("")
         st.write("")
@@ -624,7 +625,7 @@ else:
 
 # --- 3. CARRITO ACTIVO Y RESUMEN FINANCIERO ---
 if st.session_state["carrito_ligeros"]:
-    st.markdown("### 📋 Partidas en la Cotización")
+    st.markdown("### 📋 Partidas en la Cotización (Vista Interna)")
     for item in st.session_state["carrito_ligeros"]:
         niv, prec = calcular_nivel_y_precio(item["clave"], item["cantidad"])
         item["nivel"] = niv
@@ -638,7 +639,7 @@ if st.session_state["carrito_ligeros"]:
             "Clave": x["clave"],
             "Producto": x["producto"],
             "Cantidad": x["cantidad"],
-            "Nivel": x["nivel"],
+            "Nivel (Interno)": x["nivel"],
             "P. Lista": f"${x['precio_lista']:,.2f}",
             "P. Aplicado": f"${x['precio_unit']:,.2f}",
             "Importe": f"${x['cantidad'] * x['precio_unit']:,.2f}"
@@ -669,7 +670,7 @@ if st.session_state["carrito_ligeros"]:
 
     st.markdown("---")
 
-    # --- REGLA DE DESCUENTO: SOLO VISIBLE EN NIVEL 1 Y NIVEL 2 ---
+    # --- REGLA DE DESCUENTO: SOLO VISIBLE EN NIVEL 1 Y NIVEL 2 (MÁX. 10%) ---
     if tiene_nivel_3:
         desc_extra_pct = 0.0
         a1, a3 = st.columns([1.4, 3.6])
@@ -683,10 +684,11 @@ if st.session_state["carrito_ligeros"]:
         with a1:
             flete = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, value=0.0, step=100.0)
         with a2:
-            desc_extra_pct = st.number_input("🏷️ Descuento Adicional (%)", min_value=0.0, max_value=30.0, value=0.0, step=0.5)
+            desc_extra_pct = st.number_input("🏷️ Descuento Adicional (%, máx 10%)", min_value=0.0, max_value=MAX_DESC_PCT, value=0.0, step=0.5)
         with a3:
             notas = st.text_input("Observaciones en PDF", placeholder="Ej. Entrega en planta baja, pago contra entrega...")
 
+    desc_extra_pct = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
     subtotal_bruto = sum(x["cantidad"] * x["precio_unit"] for x in st.session_state["carrito_ligeros"])
     ahorro_vol = sum(max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"]) for x in st.session_state["carrito_ligeros"])
     desc_adicional = subtotal_bruto * (desc_extra_pct / 100.0)
@@ -722,7 +724,7 @@ if st.session_state["carrito_ligeros"]:
                 flete, desc_extra_pct, PRECIOS_INCLUYEN_IVA, notas
             )
 
-            # Guardar en las 13 columnas de la pestaña Cotizaciones
+            # Guardar en las 13 columnas de la pestaña Cotizaciones (los niveles se conservan internamente)
             if doc:
                 try:
                     hoja_cot = doc.worksheet("Cotizaciones")
