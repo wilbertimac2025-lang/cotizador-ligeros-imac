@@ -21,7 +21,7 @@ st.set_page_config(
 # --- REGLAS COMERCIALES INTERNAS (OCULTAS EN PANTALLA PARA TODOS) ---
 MIN_PZAS_NIVEL_2 = 50
 MIN_PZAS_NIVEL_3 = 60
-MAX_DESC_N1_PCT = 10.0  # Límite máximo permitido para descuento individual en partidas N1
+MAX_DESC_PCT = 10.0  # Límite máximo permitido tanto en descuento individual N1 como en global (10%)
 PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
 
 # --- CANDADO DE SESIÓN ---
@@ -304,16 +304,18 @@ def calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iv
     total_desc_partidas = 0.0
     ahorro_nivel = 0.0
 
+    desc_global_seguro = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
+
     for x in carrito:
         imp_bruto = x["cantidad"] * x["precio_unit"]
-        desc_p = min(max(0.0, float(x.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if x["nivel"] == "NIVEL 1" else 0.0
+        desc_p = min(max(0.0, float(x.get("desc_pct", 0.0))), MAX_DESC_PCT) if x["nivel"] == "NIVEL 1" else 0.0
         desc_monto = imp_bruto * (desc_p / 100.0)
         subtotal_bruto += imp_bruto
         total_desc_partidas += desc_monto
         ahorro_nivel += max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"])
 
     subtotal_post_partidas = subtotal_bruto - total_desc_partidas
-    desc_global_monto = subtotal_post_partidas * (desc_extra_pct / 100.0)
+    desc_global_monto = subtotal_post_partidas * (desc_global_seguro / 100.0)
     base_neta = subtotal_post_partidas - desc_global_monto + flete
 
     if precios_incluyen_iva:
@@ -335,7 +337,7 @@ def calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iv
         "total_final": total_final
     }
 
-# --- DISEÑO PDF CORPORATIVO MODERNO (CON COLUMNA DE DESCUENTO INDIVIDUAL N1 HASTA 10%) ---
+# --- DISEÑO PDF CORPORATIVO MODERNO (SIN MOSTRAR N1/N2/N3 AL CLIENTE) ---
 class PDFMostrador(FPDF):
     def __init__(self, suc_nombre, folio_txt, fecha_txt):
         super().__init__()
@@ -395,6 +397,7 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
+    desc_extra_pct = min(max(0.0, float(desc_extra_pct)), MAX_DESC_PCT)
     y_cards = pdf.get_y()
 
     # Tarjeta 1: Sucursal Emisora
@@ -448,15 +451,14 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 
     pdf.set_y(y_cards + 42)
 
-    # Encabezado de tabla (suma exacta = 190mm)
+    # Encabezado de tabla SIN columna NIVEL (suma exacta = 190mm)
     def dibujar_encabezado_tabla():
         pdf.set_fill_color(15, 60, 140)
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Arial", "B", 7.8)
         pdf.cell(24, 7, "CLAVE", 0, 0, "C", True)
-        pdf.cell(74, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
+        pdf.cell(87, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
         pdf.cell(15, 7, "CANT.", 0, 0, "C", True)
-        pdf.cell(13, 7, "NIVEL", 0, 0, "C", True)
         pdf.cell(15, 7, "DESC.", 0, 0, "C", True)
         pdf.cell(24, 7, "P. UNIT.", 0, 0, "R", True)
         pdf.cell(25, 7, "IMPORTE", 0, 1, "R", True)
@@ -474,15 +476,14 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
         pdf.set_text_color(30, 30, 30)
         pdf.set_font("Arial", "", 7.3)
 
-        desc_p_pct = min(max(0.0, float(row.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if row["nivel"] == "NIVEL 1" else 0.0
+        desc_p_pct = min(max(0.0, float(row.get("desc_pct", 0.0))), MAX_DESC_PCT) if row["nivel"] == "NIVEL 1" else 0.0
         importe_bruto = row["cantidad"] * row["precio_unit"]
         importe_neto = importe_bruto * (1.0 - desc_p_pct / 100.0)
         desc_txt = f"{desc_p_pct:.1f}%" if desc_p_pct > 0 else "-"
 
         pdf.cell(24, 6.5, limpiar_pdf_txt(row["clave"][:13]), "B", 0, "C", fill)
-        pdf.cell(74, 6.5, limpiar_pdf_txt(row["producto"][:43]), "B", 0, "L", fill)
+        pdf.cell(87, 6.5, limpiar_pdf_txt(row["producto"][:51]), "B", 0, "L", fill)
         pdf.cell(15, 6.5, f"{row['cantidad']:g}", "B", 0, "C", fill)
-        pdf.cell(13, 6.5, limpiar_pdf_txt(row["nivel"].replace("NIVEL ", "N")), "B", 0, "C", fill)
         pdf.cell(15, 6.5, desc_txt, "B", 0, "C", fill)
         pdf.cell(24, 6.5, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
         pdf.cell(25, 6.5, f"${importe_neto:,.2f}", "B", 1, "R", fill)
@@ -504,7 +505,7 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 
     if tot["total_desc_partidas"] > 0:
         pdf.set_text_color(200, 30, 30)
-        pdf.cell(138, 5.5, "DESCUENTO ESPECIAL EN PARTIDAS N1:", 0, 0, "R")
+        pdf.cell(138, 5.5, "DESCUENTO ESPECIAL APLICADO:", 0, 0, "R")
         pdf.cell(52, 5.5, f"-${tot['total_desc_partidas']:,.2f} MXN", 0, 1, "R")
         pdf.set_text_color(55, 55, 55)
 
@@ -605,7 +606,7 @@ if "ed_pdf_nombre" not in st.session_state:
     st.session_state["ed_pdf_nombre"] = ""
 
 def cargar_cotizacion_en_editor(fila, fila_idx):
-    """Carga los 13 campos y el Datos_JSON (incluyendo desc_pct por partida N1 topado al 10%) en el editor."""
+    """Carga los 13 campos y el Datos_JSON (con descuentos topados al 10%) en el editor."""
     folio = str(fila[0]).strip()
     suc = str(fila[2]).strip() if len(fila) > 2 and str(fila[2]).strip() in CONFIG_SUCURSALES else "IMAC"
     asesor_f = str(fila[3]).strip() if len(fila) > 3 else ""
@@ -628,7 +629,7 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
                 clave_p = str(p.get("clave", "")).strip()
                 cant_p = float(p.get("cantidad", 1.0))
                 niv_p, prec_p, lista_p = calcular_nivel_y_precio(clave_p, cant_p, p.get("precio_unit", 0.0))
-                desc_p_guardado = min(max(0.0, float(p.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if niv_p == "NIVEL 1" else 0.0
+                desc_p_guardado = min(max(0.0, float(p.get("desc_pct", 0.0))), MAX_DESC_PCT) if niv_p == "NIVEL 1" else 0.0
                 prod_nombre = CATALOGO_LIGEROS[clave_p]["producto"] if clave_p in CATALOGO_LIGEROS else str(p.get("producto", clave_p))
                 cat_nombre = CATALOGO_LIGEROS[clave_p]["categoria"] if clave_p in CATALOGO_LIGEROS else str(p.get("categoria", "General"))
                 partidas.append({
@@ -642,7 +643,7 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
                     "desc_pct": desc_p_guardado
                 })
             flete_f = max(0.0, float(payload.get("flete", 0.0)))
-            desc_f = min(max(0.0, float(payload.get("desc_extra_pct", 0.0))), 30.0)
+            desc_f = min(max(0.0, float(payload.get("desc_extra_pct", 0.0))), MAX_DESC_PCT)
             notas_f = str(payload.get("notas", ""))
             correo_f = str(payload.get("correo_cliente", ""))
             if payload.get("vigencia"):
@@ -691,7 +692,7 @@ with col_logo:
         st.markdown("### 🏢 IMAC")
 with col_tit:
     st.title("Historial y Edición de Cotizaciones")
-    st.caption("Consulta folios guardados, ajusta partidas o aplica descuentos individuales en partidas N1 (máx. 10%) y regenera el PDF")
+    st.caption("Consulta folios guardados, ajusta partidas o aplica descuentos (máx. 10%) y regenera el PDF limpio para el cliente")
 st.markdown("---")
 
 doc = conectar_sheets()
@@ -837,7 +838,7 @@ if st.session_state.get("ed_folio"):
                 cant_add = st.number_input("Cantidad", min_value=1.0, value=10.0, step=1.0, key="ed_cant_add")
             with ep3:
                 niv_a, prec_a, _ = calcular_nivel_y_precio(clv_add, cant_add)
-                st.metric(niv_a, f"${prec_a:,.2f}")
+                st.metric(f"{niv_a} (Interno)", f"${prec_a:,.2f}")
             with ep4:
                 st.write("")
                 st.write("")
@@ -907,11 +908,11 @@ if st.session_state.get("ed_folio"):
             with r5:
                 # EXCEPCIÓN EN EDICIÓN: permite descuento % individual en partidas N1 con tope máximo de 10%
                 if item["nivel"] == "NIVEL 1":
-                    valor_inicial_desc = min(max(0.0, float(item.get("desc_pct", 0.0))), MAX_DESC_N1_PCT)
+                    valor_inicial_desc = min(max(0.0, float(item.get("desc_pct", 0.0))), MAX_DESC_PCT)
                     desc_p_val = st.number_input(
                         "Desc %",
                         min_value=0.0,
-                        max_value=MAX_DESC_N1_PCT,
+                        max_value=MAX_DESC_PCT,
                         value=valor_inicial_desc,
                         step=0.5,
                         key=f"descp_{folio_activo}_{item['clave']}_{idx}",
@@ -934,7 +935,7 @@ if st.session_state.get("ed_folio"):
 
         st.markdown("---")
 
-        # --- Regla de Descuento Global vs. Excepción por Partida N1 ---
+        # --- Regla de Descuento Global (máx. 10%) vs. Excepción por Partida N1 (máx. 10%) ---
         tiene_nivel_3 = any(x["nivel"] == "NIVEL 3" for x in st.session_state["ed_carrito"])
         tiene_nivel_1 = any(x["nivel"] == "NIVEL 1" for x in st.session_state["ed_carrito"])
 
@@ -954,7 +955,7 @@ if st.session_state.get("ed_folio"):
             with a1:
                 flete_ed = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, step=100.0, key="ed_flete")
             with a2:
-                desc_extra_ed = st.number_input("🏷️ Descuento Adicional Global (%)", min_value=0.0, max_value=30.0, step=0.5, key="ed_desc_extra")
+                desc_extra_ed = st.number_input("🏷️ Descuento Adicional Global (%, máx 10%)", min_value=0.0, max_value=MAX_DESC_PCT, step=0.5, key="ed_desc_extra")
             with a3:
                 notas_ed = st.text_input("Observaciones en PDF", key="ed_notas")
 
