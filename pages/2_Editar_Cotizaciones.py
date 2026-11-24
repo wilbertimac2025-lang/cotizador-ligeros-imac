@@ -21,6 +21,7 @@ st.set_page_config(
 # --- REGLAS COMERCIALES INTERNAS (OCULTAS EN PANTALLA PARA TODOS) ---
 MIN_PZAS_NIVEL_2 = 50
 MIN_PZAS_NIVEL_3 = 60
+MAX_DESC_N1_PCT = 10.0  # Límite máximo permitido para descuento individual en partidas N1
 PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
 
 # --- CANDADO DE SESIÓN ---
@@ -298,7 +299,43 @@ def calcular_nivel_y_precio(clave, cantidad, precio_fallback=0.0):
         return "NIVEL 1", item["n1"], item["n1"]
     return "NIVEL 1", float(precio_fallback), float(precio_fallback)
 
-# --- DISEÑO PDF CORPORATIVO MODERNO (IDÉNTICO AL COTIZADOR) ---
+def calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iva):
+    subtotal_bruto = 0.0
+    total_desc_partidas = 0.0
+    ahorro_nivel = 0.0
+
+    for x in carrito:
+        imp_bruto = x["cantidad"] * x["precio_unit"]
+        desc_p = min(max(0.0, float(x.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if x["nivel"] == "NIVEL 1" else 0.0
+        desc_monto = imp_bruto * (desc_p / 100.0)
+        subtotal_bruto += imp_bruto
+        total_desc_partidas += desc_monto
+        ahorro_nivel += max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"])
+
+    subtotal_post_partidas = subtotal_bruto - total_desc_partidas
+    desc_global_monto = subtotal_post_partidas * (desc_extra_pct / 100.0)
+    base_neta = subtotal_post_partidas - desc_global_monto + flete
+
+    if precios_incluyen_iva:
+        total_final = base_neta
+        subtotal_sin_iva = total_final / 1.16
+        iva_monto = total_final - subtotal_sin_iva
+    else:
+        subtotal_sin_iva = base_neta
+        iva_monto = subtotal_sin_iva * 0.16
+        total_final = subtotal_sin_iva + iva_monto
+
+    return {
+        "subtotal_bruto": subtotal_bruto,
+        "total_desc_partidas": total_desc_partidas,
+        "desc_global_monto": desc_global_monto,
+        "ahorro_nivel": ahorro_nivel,
+        "subtotal_sin_iva": subtotal_sin_iva,
+        "iva_monto": iva_monto,
+        "total_final": total_final
+    }
+
+# --- DISEÑO PDF CORPORATIVO MODERNO (CON COLUMNA DE DESCUENTO INDIVIDUAL N1 HASTA 10%) ---
 class PDFMostrador(FPDF):
     def __init__(self, suc_nombre, folio_txt, fecha_txt):
         super().__init__()
@@ -411,21 +448,20 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
 
     pdf.set_y(y_cards + 42)
 
+    # Encabezado de tabla (suma exacta = 190mm)
     def dibujar_encabezado_tabla():
         pdf.set_fill_color(15, 60, 140)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Arial", "B", 8)
-        pdf.cell(26, 7, "CLAVE", 0, 0, "C", True)
-        pdf.cell(85, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
-        pdf.cell(16, 7, "CANT.", 0, 0, "C", True)
-        pdf.cell(15, 7, "NIVEL", 0, 0, "C", True)
-        pdf.cell(23, 7, "P. UNIT.", 0, 0, "R", True)
+        pdf.set_font("Arial", "B", 7.8)
+        pdf.cell(24, 7, "CLAVE", 0, 0, "C", True)
+        pdf.cell(74, 7, "DESCRIPCION DEL MATERIAL", 0, 0, "L", True)
+        pdf.cell(15, 7, "CANT.", 0, 0, "C", True)
+        pdf.cell(13, 7, "NIVEL", 0, 0, "C", True)
+        pdf.cell(15, 7, "DESC.", 0, 0, "C", True)
+        pdf.cell(24, 7, "P. UNIT.", 0, 0, "R", True)
         pdf.cell(25, 7, "IMPORTE", 0, 1, "R", True)
 
     dibujar_encabezado_tabla()
-
-    subtotal_bruto = 0.0
-    ahorro_nivel = 0.0
 
     for idx, row in enumerate(carrito):
         if pdf.get_y() > 258:
@@ -436,49 +472,46 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
         pdf.set_fill_color(246, 249, 253)
         pdf.set_draw_color(225, 230, 238)
         pdf.set_text_color(30, 30, 30)
-        pdf.set_font("Arial", "", 7.5)
+        pdf.set_font("Arial", "", 7.3)
 
-        importe = row["cantidad"] * row["precio_unit"]
-        subtotal_bruto += importe
-        ahorro_nivel += max(0.0, (row["precio_lista"] - row["precio_unit"]) * row["cantidad"])
+        desc_p_pct = min(max(0.0, float(row.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if row["nivel"] == "NIVEL 1" else 0.0
+        importe_bruto = row["cantidad"] * row["precio_unit"]
+        importe_neto = importe_bruto * (1.0 - desc_p_pct / 100.0)
+        desc_txt = f"{desc_p_pct:.1f}%" if desc_p_pct > 0 else "-"
 
-        pdf.cell(26, 6.5, limpiar_pdf_txt(row["clave"][:14]), "B", 0, "C", fill)
-        pdf.cell(85, 6.5, limpiar_pdf_txt(row["producto"][:49]), "B", 0, "L", fill)
-        pdf.cell(16, 6.5, f"{row['cantidad']:g}", "B", 0, "C", fill)
-        pdf.cell(15, 6.5, limpiar_pdf_txt(row["nivel"].replace("NIVEL ", "N")), "B", 0, "C", fill)
-        pdf.cell(23, 6.5, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
-        pdf.cell(25, 6.5, f"${importe:,.2f}", "B", 1, "R", fill)
+        pdf.cell(24, 6.5, limpiar_pdf_txt(row["clave"][:13]), "B", 0, "C", fill)
+        pdf.cell(74, 6.5, limpiar_pdf_txt(row["producto"][:43]), "B", 0, "L", fill)
+        pdf.cell(15, 6.5, f"{row['cantidad']:g}", "B", 0, "C", fill)
+        pdf.cell(13, 6.5, limpiar_pdf_txt(row["nivel"].replace("NIVEL ", "N")), "B", 0, "C", fill)
+        pdf.cell(15, 6.5, desc_txt, "B", 0, "C", fill)
+        pdf.cell(24, 6.5, f"${row['precio_unit']:,.2f}", "B", 0, "R", fill)
+        pdf.cell(25, 6.5, f"${importe_neto:,.2f}", "B", 1, "R", fill)
 
-    # Totales financieros
-    descuento_extra_monto = subtotal_bruto * (desc_extra_pct / 100.0)
-    base_neta = subtotal_bruto - descuento_extra_monto + flete
+    tot = calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iva)
 
-    if precios_incluyen_iva:
-        total_final = base_neta
-        subtotal_sin_iva = total_final / 1.16
-        iva_monto = total_final - subtotal_sin_iva
-    else:
-        subtotal_sin_iva = base_neta
-        iva_monto = subtotal_sin_iva * 0.16
-        total_final = subtotal_sin_iva + iva_monto
-
-    if pdf.get_y() > 210:
+    if pdf.get_y() > 205:
         pdf.add_page()
 
     pdf.ln(5)
     pdf.set_font("Arial", "B", 8.8)
     pdf.set_text_color(55, 55, 55)
 
-    if ahorro_nivel > 0:
+    if tot["ahorro_nivel"] > 0:
         pdf.set_text_color(0, 130, 70)
         pdf.cell(138, 5.5, "AHORRO APLICADO POR VOLUMEN:", 0, 0, "R")
-        pdf.cell(52, 5.5, f"${ahorro_nivel:,.2f} MXN", 0, 1, "R")
+        pdf.cell(52, 5.5, f"${tot['ahorro_nivel']:,.2f} MXN", 0, 1, "R")
         pdf.set_text_color(55, 55, 55)
 
-    if descuento_extra_monto > 0:
+    if tot["total_desc_partidas"] > 0:
+        pdf.set_text_color(200, 30, 30)
+        pdf.cell(138, 5.5, "DESCUENTO ESPECIAL EN PARTIDAS N1:", 0, 0, "R")
+        pdf.cell(52, 5.5, f"-${tot['total_desc_partidas']:,.2f} MXN", 0, 1, "R")
+        pdf.set_text_color(55, 55, 55)
+
+    if tot["desc_global_monto"] > 0:
         pdf.set_text_color(200, 30, 30)
         pdf.cell(138, 5.5, f"DESCUENTO ADICIONAL ({desc_extra_pct:.1f}%):", 0, 0, "R")
-        pdf.cell(52, 5.5, f"-${descuento_extra_monto:,.2f} MXN", 0, 1, "R")
+        pdf.cell(52, 5.5, f"-${tot['desc_global_monto']:,.2f} MXN", 0, 1, "R")
         pdf.set_text_color(55, 55, 55)
 
     if flete > 0:
@@ -486,9 +519,9 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
         pdf.cell(52, 5.5, f"${flete:,.2f} MXN", 0, 1, "R")
 
     pdf.cell(138, 5.5, "SUBTOTAL:", 0, 0, "R")
-    pdf.cell(52, 5.5, f"${subtotal_sin_iva:,.2f} MXN", 0, 1, "R")
+    pdf.cell(52, 5.5, f"${tot['subtotal_sin_iva']:,.2f} MXN", 0, 1, "R")
     pdf.cell(138, 5.5, "IVA (16%):", 0, 0, "R")
-    pdf.cell(52, 5.5, f"${iva_monto:,.2f} MXN", 0, 1, "R")
+    pdf.cell(52, 5.5, f"${tot['iva_monto']:,.2f} MXN", 0, 1, "R")
 
     pdf.ln(2)
     y_tot = pdf.get_y()
@@ -498,7 +531,7 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
     pdf.set_xy(88, y_tot)
     pdf.cell(58, 9, "TOTAL A PAGAR", 0, 0, "R", True)
     pdf.set_fill_color(0, 150, 255)
-    pdf.cell(54, 9, f"${total_final:,.2f} MXN", 0, 1, "C", True)
+    pdf.cell(54, 9, f"${tot['total_final']:,.2f} MXN", 0, 1, "C", True)
 
     # Bloque Bancario Dinámico por Sucursal
     pdf.ln(6)
@@ -546,7 +579,14 @@ def generar_pdf_mostrador(folio, sucursal_nombre, suc_info, cliente, telefono, c
         pdf.set_text_color(55, 55, 55)
         pdf.multi_cell(0, 4, limpiar_pdf_txt(notas))
 
-    return pdf.output(dest="S").encode("latin-1"), total_final, subtotal_sin_iva, iva_monto, ahorro_nivel
+    return (
+        pdf.output(dest="S").encode("latin-1"),
+        tot["total_final"],
+        tot["subtotal_sin_iva"],
+        tot["iva_monto"],
+        tot["ahorro_nivel"],
+        tot["total_desc_partidas"]
+    )
 
 # --- ESTADO DE EDICIÓN ---
 if "ed_folio" not in st.session_state:
@@ -565,7 +605,7 @@ if "ed_pdf_nombre" not in st.session_state:
     st.session_state["ed_pdf_nombre"] = ""
 
 def cargar_cotizacion_en_editor(fila, fila_idx):
-    """Carga los 13 campos y el Datos_JSON de la fila seleccionada en el estado de edición."""
+    """Carga los 13 campos y el Datos_JSON (incluyendo desc_pct por partida N1 topado al 10%) en el editor."""
     folio = str(fila[0]).strip()
     suc = str(fila[2]).strip() if len(fila) > 2 and str(fila[2]).strip() in CONFIG_SUCURSALES else "IMAC"
     asesor_f = str(fila[3]).strip() if len(fila) > 3 else ""
@@ -588,6 +628,7 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
                 clave_p = str(p.get("clave", "")).strip()
                 cant_p = float(p.get("cantidad", 1.0))
                 niv_p, prec_p, lista_p = calcular_nivel_y_precio(clave_p, cant_p, p.get("precio_unit", 0.0))
+                desc_p_guardado = min(max(0.0, float(p.get("desc_pct", 0.0))), MAX_DESC_N1_PCT) if niv_p == "NIVEL 1" else 0.0
                 prod_nombre = CATALOGO_LIGEROS[clave_p]["producto"] if clave_p in CATALOGO_LIGEROS else str(p.get("producto", clave_p))
                 cat_nombre = CATALOGO_LIGEROS[clave_p]["categoria"] if clave_p in CATALOGO_LIGEROS else str(p.get("categoria", "General"))
                 partidas.append({
@@ -597,7 +638,8 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
                     "cantidad": cant_p,
                     "nivel": niv_p,
                     "precio_lista": lista_p,
-                    "precio_unit": prec_p
+                    "precio_unit": prec_p,
+                    "desc_pct": desc_p_guardado
                 })
             flete_f = max(0.0, float(payload.get("flete", 0.0)))
             desc_f = min(max(0.0, float(payload.get("desc_extra_pct", 0.0))), 30.0)
@@ -649,7 +691,7 @@ with col_logo:
         st.markdown("### 🏢 IMAC")
 with col_tit:
     st.title("Historial y Edición de Cotizaciones")
-    st.caption("Consulta folios guardados, ajusta partidas o descuentos y regenera el PDF conservando el mismo folio")
+    st.caption("Consulta folios guardados, ajusta partidas o aplica descuentos individuales en partidas N1 (máx. 10%) y regenera el PDF")
 st.markdown("---")
 
 doc = conectar_sheets()
@@ -676,7 +718,6 @@ for idx, fila in enumerate(todas_filas):
         continue
     registros_disponibles.append((idx + 1, fila))
 
-# Ordenar más recientes primero
 registros_disponibles.reverse()
 
 if not registros_disponibles:
@@ -809,6 +850,8 @@ if st.session_state.get("ed_folio"):
                         existente["nivel"] = n_niv
                         existente["precio_unit"] = n_prec
                         existente["precio_lista"] = n_list
+                        if n_niv != "NIVEL 1":
+                            existente["desc_pct"] = 0.0
                     else:
                         st.session_state["ed_carrito"].append({
                             "clave": clv_add,
@@ -817,28 +860,30 @@ if st.session_state.get("ed_folio"):
                             "cantidad": cant_add,
                             "nivel": niv_a,
                             "precio_lista": inf_add["n1"],
-                            "precio_unit": prec_a
+                            "precio_unit": prec_a,
+                            "desc_pct": 0.0
                         })
                     st.rerun()
         else:
             st.warning("Sin coincidencias en el catálogo.")
 
-    # --- Edición directa de cantidades y eliminación por partida ---
-    st.markdown("### 📋 Modificar Cantidades o Quitar Partidas")
+    # --- Edición directa de cantidades, descuento individual N1 (máx. 10%) y eliminación ---
+    st.markdown("### 📋 Modificar Cantidades, Descuento en Partidas N1 (Máx. 10%) o Quitar Partidas")
     if not st.session_state["ed_carrito"]:
         st.warning("⚠️ Este folio no tiene partidas cargadas (o es un registro antiguo sin Datos_JSON). Agrega materiales arriba para reconstruirlo.")
     else:
         indice_a_eliminar = None
-        h1, h2, h3, h4, h5, h6 = st.columns([1.2, 3.2, 1.3, 0.9, 1.3, 0.7])
+        h1, h2, h3, h4, h5, h6, h7 = st.columns([1.1, 2.7, 1.2, 0.7, 1.2, 1.2, 0.6])
         h1.caption("**Clave**")
         h2.caption("**Producto**")
         h3.caption("**Cantidad**")
         h4.caption("**Nivel**")
-        h5.caption("**Importe**")
-        h6.caption("**Quitar**")
+        h5.caption("**Desc. N1 (máx 10%)**")
+        h6.caption("**Importe Neto**")
+        h7.caption("**Quitar**")
 
         for idx, item in enumerate(st.session_state["ed_carrito"]):
-            r1, r2, r3, r4, r5, r6 = st.columns([1.2, 3.2, 1.3, 0.9, 1.3, 0.7])
+            r1, r2, r3, r4, r5, r6, r7 = st.columns([1.1, 2.7, 1.2, 0.7, 1.2, 1.2, 0.6])
             with r1:
                 st.write(f"`{item['clave']}`")
             with r2:
@@ -860,8 +905,26 @@ if st.session_state.get("ed_folio"):
             with r4:
                 st.write(item["nivel"].replace("NIVEL ", "N"))
             with r5:
-                st.write(f"${item['cantidad'] * item['precio_unit']:,.2f}")
+                # EXCEPCIÓN EN EDICIÓN: permite descuento % individual en partidas N1 con tope máximo de 10%
+                if item["nivel"] == "NIVEL 1":
+                    valor_inicial_desc = min(max(0.0, float(item.get("desc_pct", 0.0))), MAX_DESC_N1_PCT)
+                    desc_p_val = st.number_input(
+                        "Desc %",
+                        min_value=0.0,
+                        max_value=MAX_DESC_N1_PCT,
+                        value=valor_inicial_desc,
+                        step=0.5,
+                        key=f"descp_{folio_activo}_{item['clave']}_{idx}",
+                        label_visibility="collapsed"
+                    )
+                    item["desc_pct"] = desc_p_val
+                else:
+                    item["desc_pct"] = 0.0
+                    st.caption("🔒 0%" if item["nivel"] == "NIVEL 3" else "—")
             with r6:
+                imp_neto_fila = (item["cantidad"] * item["precio_unit"]) * (1.0 - item["desc_pct"] / 100.0)
+                st.write(f"${imp_neto_fila:,.2f}")
+            with r7:
                 if st.button("🗑️", key=f"del_{folio_activo}_{item['clave']}_{idx}", help="Eliminar partida"):
                     indice_a_eliminar = idx
 
@@ -871,8 +934,9 @@ if st.session_state.get("ed_folio"):
 
         st.markdown("---")
 
-        # --- Regla de Descuento: Solo habilitada en Nivel 1 y Nivel 2 ---
+        # --- Regla de Descuento Global vs. Excepción por Partida N1 ---
         tiene_nivel_3 = any(x["nivel"] == "NIVEL 3" for x in st.session_state["ed_carrito"])
+        tiene_nivel_1 = any(x["nivel"] == "NIVEL 1" for x in st.session_state["ed_carrito"])
 
         if tiene_nivel_3:
             desc_extra_ed = 0.0
@@ -881,38 +945,29 @@ if st.session_state.get("ed_folio"):
                 flete_ed = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, step=100.0, key="ed_flete")
             with a3:
                 notas_ed = st.text_input("Observaciones en PDF", key="ed_notas")
-            st.info("🔒 **Descuento adicional deshabilitado:** al menos una partida alcanzó tarifa preferencial de **Nivel 3 (Mayoreo)**.")
+            if tiene_nivel_1:
+                st.info("🏷️ **Excepción en Edición activa:** el descuento global permanece bloqueado por existir partidas en **Nivel 3 (Mayoreo)**, pero puedes aplicar hasta **10.0%** de descuento individual en la columna **Desc. N1 (máx 10%)** a cada partida en **Nivel 1**.")
+            else:
+                st.info("🔒 **Descuento adicional deshabilitado:** todas las partidas cuentan con tarifa preferencial de mayoreo.")
         else:
             a1, a2, a3 = st.columns([1.2, 1.2, 2.6])
             with a1:
                 flete_ed = st.number_input("🚚 Flete / Envío ($ MXN)", min_value=0.0, step=100.0, key="ed_flete")
             with a2:
-                desc_extra_ed = st.number_input("🏷️ Descuento Adicional (%)", min_value=0.0, max_value=30.0, step=0.5, key="ed_desc_extra")
+                desc_extra_ed = st.number_input("🏷️ Descuento Adicional Global (%)", min_value=0.0, max_value=30.0, step=0.5, key="ed_desc_extra")
             with a3:
                 notas_ed = st.text_input("Observaciones en PDF", key="ed_notas")
 
         # --- Totales en tiempo real y comparativa vs. total anterior ---
-        subtotal_bruto = sum(x["cantidad"] * x["precio_unit"] for x in st.session_state["ed_carrito"])
-        ahorro_vol = sum(max(0.0, (x["precio_lista"] - x["precio_unit"]) * x["cantidad"]) for x in st.session_state["ed_carrito"])
-        desc_adicional = subtotal_bruto * (desc_extra_ed / 100.0)
-        base_neta = subtotal_bruto - desc_adicional + flete_ed
+        tot_ed = calcular_totales_carrito(st.session_state["ed_carrito"], flete_ed, desc_extra_ed, PRECIOS_INCLUYEN_IVA)
+        diferencia_total = tot_ed["total_final"] - st.session_state["ed_total_anterior"]
 
-        if PRECIOS_INCLUYEN_IVA:
-            total_nuevo = base_neta
-            sub_nuevo = total_nuevo / 1.16
-            iva_nuevo = total_nuevo - sub_nuevo
-        else:
-            sub_nuevo = base_neta
-            iva_nuevo = sub_nuevo * 0.16
-            total_nuevo = sub_nuevo + iva_nuevo
-
-        diferencia_total = total_nuevo - st.session_state["ed_total_anterior"]
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Subtotal", f"${sub_nuevo:,.2f}")
-        k2.metric("IVA (16%)", f"${iva_nuevo:,.2f}")
-        k3.metric("Ahorro por Volumen", f"${ahorro_vol:,.2f}")
-        k4.metric("NUEVO TOTAL MXN", f"${total_nuevo:,.2f}", f"{diferencia_total:+,.2f} vs original")
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Subtotal", f"${tot_ed['subtotal_sin_iva']:,.2f}")
+        k2.metric("IVA (16%)", f"${tot_ed['iva_monto']:,.2f}")
+        k3.metric("Ahorro Volumen", f"${tot_ed['ahorro_nivel']:,.2f}")
+        k4.metric("Desc. Partidas N1", f"-${tot_ed['total_desc_partidas']:,.2f}")
+        k5.metric("NUEVO TOTAL MXN", f"${tot_ed['total_final']:,.2f}", f"{diferencia_total:+,.2f} vs original")
 
         enviar_correo_ed = st.checkbox("📧 Reenviar copia del PDF actualizado por correo", value=False, key="ed_chk_mail")
 
@@ -920,16 +975,17 @@ if st.session_state.get("ed_folio"):
             with st.spinner(f"Actualizando {folio_activo} en Google Sheets y regenerando PDF..."):
                 cliente_final = cliente_ed.strip() if cliente_ed.strip() else "PUBLICO EN GENERAL"
 
-                pdf_bytes, tot_pdf, sub_pdf, iva_pdf, ahorr_pdf = generar_pdf_mostrador(
+                pdf_bytes, tot_pdf, sub_pdf, iva_pdf, ahorr_pdf, desc_n1_pdf = generar_pdf_mostrador(
                     folio_activo, suc_folio, suc_info_folio, cliente_final, telefono_ed,
                     correo_ed, asesor_ed, vigencia_ed, st.session_state["ed_carrito"],
                     flete_ed, desc_extra_ed, PRECIOS_INCLUYEN_IVA, notas_ed
                 )
 
                 fecha_act = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-                resumen_partidas = " / ".join(
-                    [f"{x['cantidad']:g}x {x['clave']} ({x['nivel']})" for x in st.session_state["ed_carrito"]]
-                )
+                resumen_partidas = " / ".join([
+                    f"{x['cantidad']:g}x {x['clave']} ({x['nivel']}" + (f" -{x['desc_pct']:g}%" if x.get("desc_pct", 0.0) > 0 else "") + ")"
+                    for x in st.session_state["ed_carrito"]
+                ])
                 payload_json = json.dumps({
                     "partidas": st.session_state["ed_carrito"],
                     "flete": flete_ed,
@@ -955,7 +1011,7 @@ if st.session_state.get("ed_folio"):
                     registrar_bitacora(
                         doc,
                         "Edición Cotizaciones",
-                        f"Actualizó {folio_activo} ({suc_folio}) de ${st.session_state['ed_total_anterior']:,.2f} a ${tot_pdf:,.2f} MXN ({len(st.session_state['ed_carrito'])} partidas, desc. extra {desc_extra_ed:.1f}%)"
+                        f"Actualizó {folio_activo} ({suc_folio}) de ${st.session_state['ed_total_anterior']:,.2f} a ${tot_pdf:,.2f} MXN ({len(st.session_state['ed_carrito'])} partidas, desc. N1 ${desc_n1_pdf:,.2f}, desc. global {desc_extra_ed:.1f}%)"
                     )
                     st.session_state["ed_total_anterior"] = tot_pdf
                     nombre_pdf = f"Cotizacion_{folio_activo}_{cliente_final.replace(' ', '_')}.pdf"
