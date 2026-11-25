@@ -45,12 +45,28 @@ if not es_autorizado:
     st.info(f"Tu perfil actual es **{rol_actual or 'Mostrador'}**. Utiliza el menú lateral para acceder al Cotizador o a Editar Cotizaciones.")
     st.stop()
 
-# --- PALETA CORPORATIVA (AZUL IMAC + DORADO EJECUTIVO) ---
+# --- PALETA CORPORATIVA Y SEMÁNTICA ---
 COLOR_AZUL_PRIMARIO = "#0F3C8C"
 COLOR_AZUL_CLARO = "#0096FF"
 COLOR_DORADO = "#C9A227"
+COLOR_VERDE = "#1B8A5A"
+COLOR_ROJO = "#C81E1E"
+
+ESTATUS_OPCIONES = ["Cotizada", "Vendida", "Cancelada"]
+ESCALA_ESTATUS = {
+    "domain": ["Vendida", "Cotizada", "Cancelada"],
+    "range": [COLOR_VERDE, COLOR_AZUL_CLARO, COLOR_ROJO],
+}
 
 # --- FUNCIONES DE PARSEO Y CARGA ---
+def normalizar_estatus(valor_raw):
+    t = normalizar_texto(valor_raw)
+    if "vendid" in t or "ganad" in t or "cerrad" in t:
+        return "Vendida"
+    if "cancel" in t or "perdid" in t or "anulad" in t:
+        return "Cancelada"
+    return "Cotizada"
+
 def parsear_fecha_sheet(fecha_str):
     txt = str(fecha_str or "").strip()
     for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -90,52 +106,63 @@ def cargar_datos_cotizaciones(doc):
         ahorro_vol = limpiar_monto(fila[11]) if len(fila) > 11 else 0.0
         datos_json_raw = str(fila[12]).strip() if len(fila) > 12 else ""
 
+        estatus_col = str(fila[13]).strip() if len(fila) > 13 else ""
+        estatus = normalizar_estatus(estatus_col) if estatus_col else ""
+
         flete = 0.0
         desc_global_pct = 0.0
         desc_n1_monto_total = 0.0
         piezas_folio = 0.0
+        partidas_temp = []
 
         if datos_json_raw:
             try:
                 payload = json.loads(datos_json_raw)
+                if not estatus and payload.get("estatus"):
+                    estatus = normalizar_estatus(payload.get("estatus"))
                 flete = float(payload.get("flete", 0.0) or 0.0)
                 desc_global_pct = float(payload.get("desc_extra_pct", 0.0) or 0.0)
-                partidas_list = payload.get("partidas", [])
-
-                for p in partidas_list:
-                    clave_p = str(p.get("clave", "")).strip()
-                    cat_info = CATALOGO_LIGEROS.get(clave_p, {})
-                    prod_nom = cat_info.get("producto") or str(p.get("producto", clave_p)).strip()
-                    familia = cat_info.get("categoria") or str(p.get("categoria", "Otros")).strip()
-                    cant = float(p.get("cantidad", 0.0) or 0.0)
-                    nivel = str(p.get("nivel", "NIVEL 1")).strip().upper()
-                    pu_base = float(p.get("precio_unit", 0.0) or 0.0)
-                    desc_p = float(p.get("desc_pct", 0.0) or 0.0) if nivel == "NIVEL 1" else 0.0
-
-                    pu_post_n1 = pu_base * (1.0 - desc_p / 100.0)
-                    pu_neto = round(pu_post_n1 * (1.0 - desc_global_pct / 100.0), 2)
-                    imp_neto = round(cant * pu_neto, 2)
-                    desc_n1_monto_total += max(0.0, (cant * pu_base) - (cant * pu_post_n1))
-                    piezas_folio += cant
-
-                    registros_prod.append({
-                        "Folio": folio,
-                        "Fecha_DT": fecha_dt,
-                        "Sucursal": suc_norm,
-                        "Razon_Social": razon_social,
-                        "Asesor": asesor,
-                        "Clave": clave_p,
-                        "Producto": prod_nom,
-                        "Familia": familia,
-                        "Nivel": nivel,
-                        "Cantidad": cant,
-                        "Importe_Neto": imp_neto
-                    })
+                partidas_temp = payload.get("partidas", [])
             except Exception:
-                pass
+                partidas_temp = []
+
+        if not estatus:
+            estatus = "Cotizada"
+
+        for p in partidas_temp:
+            clave_p = str(p.get("clave", "")).strip()
+            cat_info = CATALOGO_LIGEROS.get(clave_p, {})
+            prod_nom = cat_info.get("producto") or str(p.get("producto", clave_p)).strip()
+            familia = cat_info.get("categoria") or str(p.get("categoria", "Otros")).strip()
+            cant = float(p.get("cantidad", 0.0) or 0.0)
+            nivel = str(p.get("nivel", "NIVEL 1")).strip().upper()
+            pu_base = float(p.get("precio_unit", 0.0) or 0.0)
+            desc_p = float(p.get("desc_pct", 0.0) or 0.0) if nivel == "NIVEL 1" else 0.0
+
+            pu_post_n1 = pu_base * (1.0 - desc_p / 100.0)
+            pu_neto = round(pu_post_n1 * (1.0 - desc_global_pct / 100.0), 2)
+            imp_neto = round(cant * pu_neto, 2)
+            desc_n1_monto_total += max(0.0, (cant * pu_base) - (cant * pu_post_n1))
+            piezas_folio += cant
+
+            registros_prod.append({
+                "Folio": folio,
+                "Estatus": estatus,
+                "Fecha_DT": fecha_dt,
+                "Sucursal": suc_norm,
+                "Razon_Social": razon_social,
+                "Asesor": asesor,
+                "Clave": clave_p,
+                "Producto": prod_nom,
+                "Familia": familia,
+                "Nivel": nivel,
+                "Cantidad": cant,
+                "Importe_Neto": imp_neto
+            })
 
         registros_cot.append({
             "Folio": folio,
+            "Estatus": estatus,
             "Fecha_Texto": fecha_raw,
             "Fecha_DT": fecha_dt,
             "Fecha_Dia": fecha_dt.date() if fecha_dt else None,
@@ -149,6 +176,12 @@ def cargar_datos_cotizaciones(doc):
             "Subtotal": round(subtotal, 2),
             "IVA": round(iva, 2),
             "Total_MXN": round(total_mxn, 2),
+            "Monto_Vendido": round(total_mxn, 2) if estatus == "Vendida" else 0.0,
+            "Monto_Cotizado_Abierto": round(total_mxn, 2) if estatus == "Cotizada" else 0.0,
+            "Monto_Cancelado": round(total_mxn, 2) if estatus == "Cancelada" else 0.0,
+            "Es_Vendida": 1 if estatus == "Vendida" else 0,
+            "Es_Cotizada": 1 if estatus == "Cotizada" else 0,
+            "Es_Cancelada": 1 if estatus == "Cancelada" else 0,
             "Ahorro_Volumen": round(ahorro_vol, 2),
             "Desc_Especial_N1": round(desc_n1_monto_total, 2),
             "Desc_Global_Pct": desc_global_pct
@@ -157,6 +190,33 @@ def cargar_datos_cotizaciones(doc):
     df_cot = pd.DataFrame(registros_cot)
     df_prod = pd.DataFrame(registros_prod)
     return df_cot, df_prod
+
+def calcular_tabla_conversion(df_base, cols_grupo):
+    """Agrupa por sucursal/asesor/razón social y calcula tasas de conversión por folios y por monto."""
+    res = (
+        df_base.groupby(cols_grupo, as_index=False)
+        .agg(
+            Folios=("Folio", "count"),
+            Cotizadas=("Es_Cotizada", "sum"),
+            Vendidas=("Es_Vendida", "sum"),
+            Canceladas=("Es_Cancelada", "sum"),
+            Total_MXN=("Total_MXN", "sum"),
+            Monto_Vendido=("Monto_Vendido", "sum"),
+            Ticket_Promedio=("Total_MXN", "mean"),
+            Ahorro_Volumen=("Ahorro_Volumen", "sum"),
+            Desc_N1=("Desc_Especial_N1", "sum"),
+        )
+    )
+    res["Conv_Folios_Pct"] = res.apply(
+        lambda r: (r["Vendidas"] / r["Folios"] * 100.0) if r["Folios"] > 0 else 0.0, axis=1
+    )
+    res["Conv_Monto_Pct"] = res.apply(
+        lambda r: (r["Monto_Vendido"] / r["Total_MXN"] * 100.0) if r["Total_MXN"] > 0 else 0.0, axis=1
+    )
+    res["Ticket_Vendido"] = res.apply(
+        lambda r: (r["Monto_Vendido"] / r["Vendidas"]) if r["Vendidas"] > 0 else 0.0, axis=1
+    )
+    return res
 
 # --- BARRA LATERAL ---
 asesor_nombre_db = st.session_state.get("nombre_asesor") or st.session_state.get("usuario", "")
@@ -176,8 +236,8 @@ with col_logo:
     else:
         st.markdown("### 🏢 IMAC")
 with col_tit:
-    st.title("Dashboard Comercial — Sistemas Ligeros")
-    st.caption(f"Monitoreo ejecutivo de cotizaciones por sucursal, asesor y mezcla de productos | Corte: {ahora_mx().strftime('%d/%m/%Y %H:%M hrs')}")
+    st.title("Dashboard Comercial y Conversión — Sistemas Ligeros")
+    st.caption(f"Monitoreo ejecutivo de cotizaciones, cierres y tasa de conversión por sucursal y asesor | Corte: {ahora_mx().strftime('%d/%m/%Y %H:%M hrs')}")
 st.markdown("---")
 
 doc = conectar_sheets()
@@ -202,7 +262,7 @@ hoy_mx = ahora_mx().date()
 fecha_min_def = fechas_validas.min() if not fechas_validas.empty else hoy_mx
 fecha_max_def = fechas_validas.max() if not fechas_validas.empty else hoy_mx
 
-f1, f2, f3, f4, f5 = st.columns([1.1, 1.1, 1.6, 1.4, 1.4])
+f1, f2, f3, f4, f5, f6 = st.columns([1.0, 1.0, 1.4, 1.2, 1.2, 1.1])
 with f1:
     f_inicio = st.date_input("Desde:", value=fecha_min_def, min_value=datetime.date(2024, 1, 1), max_value=hoy_mx + datetime.timedelta(days=365))
 with f2:
@@ -218,18 +278,20 @@ with f5:
     as_base = suc_base if sel_suc == "TODAS" else suc_base[suc_base["Sucursal"] == sel_suc]
     asesores_disp = ["TODOS"] + sorted(as_base["Asesor"].dropna().unique().tolist())
     sel_asesor = st.selectbox("Asesor:", asesores_disp)
+with f6:
+    sel_estatus = st.selectbox("Estatus:", ["TODOS"] + ESTATUS_OPCIONES)
 
-# Aplicar filtros al DataFrame de cotizaciones
-mask = pd.Series(True, index=df_cot.index)
-mask &= df_cot["Fecha_Dia"].isna() | ((df_cot["Fecha_Dia"] >= f_inicio) & (df_cot["Fecha_Dia"] <= f_fin))
+mask_base = pd.Series(True, index=df_cot.index)
+mask_base &= df_cot["Fecha_Dia"].isna() | ((df_cot["Fecha_Dia"] >= f_inicio) & (df_cot["Fecha_Dia"] <= f_fin))
 if sel_razon != "TODAS":
-    mask &= (df_cot["Razon_Social"] == sel_razon)
+    mask_base &= (df_cot["Razon_Social"] == sel_razon)
 if sel_suc != "TODAS":
-    mask &= (df_cot["Sucursal"] == sel_suc)
+    mask_base &= (df_cot["Sucursal"] == sel_suc)
 if sel_asesor != "TODOS":
-    mask &= (df_cot["Asesor"] == sel_asesor)
+    mask_base &= (df_cot["Asesor"] == sel_asesor)
 
-df_f = df_cot[mask].copy()
+df_scope = df_cot[mask_base].copy()
+df_f = df_scope[df_scope["Estatus"] == sel_estatus].copy() if sel_estatus != "TODOS" else df_scope.copy()
 
 if df_f.empty:
     st.warning("No hay cotizaciones que coincidan con los filtros seleccionados.")
@@ -238,302 +300,338 @@ if df_f.empty:
 folios_activos = set(df_f["Folio"].tolist())
 df_pf = df_prod[df_prod["Folio"].isin(folios_activos)].copy() if not df_prod.empty else pd.DataFrame()
 
-# --- 3. KPIs EJECUTIVOS ---
+# --- 3. KPIs EJECUTIVOS Y CONVERSIÓN ---
 monto_total = float(df_f["Total_MXN"].sum())
-subtotal_total = float(df_f["Subtotal"].sum())
+monto_vendido = float(df_f["Monto_Vendido"].sum())
 num_folios = int(len(df_f))
+num_vendidas = int(df_f["Es_Vendida"].sum())
+num_cotizadas = int(df_f["Es_Cotizada"].sum())
+num_canceladas = int(df_f["Es_Cancelada"].sum())
+
+conv_folios_pct = (num_vendidas / num_folios * 100.0) if num_folios > 0 else 0.0
+conv_monto_pct = (monto_vendido / monto_total * 100.0) if monto_total > 0 else 0.0
+cerradas_total = num_vendidas + num_canceladas
+win_rate_cerradas = (num_vendidas / cerradas_total * 100.0) if cerradas_total > 0 else 0.0
+
 ticket_prom = monto_total / num_folios if num_folios > 0 else 0.0
-ticket_mediano = float(df_f["Total_MXN"].median()) if num_folios > 0 else 0.0
-partidas_prom = float(df_f["Partidas"].mean()) if num_folios > 0 else 0.0
-ahorro_total = float(df_f["Ahorro_Volumen"].sum() + df_f["Desc_Especial_N1"].sum())
-clientes_unicos = int(df_f["Cliente"].nunique())
+ticket_prom_vendido = monto_vendido / num_vendidas if num_vendidas > 0 else 0.0
 
 st.markdown("---")
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("💰 Monto Cotizado (c/IVA)", f"${monto_total:,.2f}", f"Sub: ${subtotal_total:,.2f}")
-k2.metric("📄 Cotizaciones", f"{num_folios:,}", f"{clientes_unicos} clientes")
-k3.metric("🎯 Ticket Promedio", f"${ticket_prom:,.2f}", f"Mediana: ${ticket_mediano:,.2f}")
-k4.metric("📦 Partidas / Folio", f"{partidas_prom:.1f}", f"{int(df_f['Piezas'].sum()):,} pzas")
-k5.metric("🏷️ Ahorro / Desc. N1", f"${ahorro_total:,.2f}", f"{(ahorro_total / subtotal_total * 100) if subtotal_total > 0 else 0.0:.1f}% s/sub")
+k1.metric("💰 Monto Cotizado (c/IVA)", f"${monto_total:,.2f}", f"{num_folios:,} folios totales")
+k2.metric("🟢 Monto Vendido", f"${monto_vendido:,.2f}", f"{conv_monto_pct:.1f}% del monto")
+k3.metric("📈 Conversión (Folios)", f"{conv_folios_pct:.1f}%", f"{num_vendidas} de {num_folios} vendidas")
+k4.metric("🎯 Ticket Promedio", f"${ticket_prom:,.2f}", f"Vendido: ${ticket_prom_vendido:,.2f}")
+k5.metric("🟡 Abiertas / 🔴 Cancel.", f"{num_cotizadas} / {num_canceladas}", f"Win-rate cerradas: {win_rate_cerradas:.1f}%")
+
+if sel_estatus != "TODOS":
+    st.caption(f"ℹ️ Estás filtrando únicamente el estatus **{sel_estatus}**. Para ver la tasa de conversión completa entre los 3 estatus, selecciona **TODOS** en el filtro Estatus.")
 
 st.markdown("---")
 
 # --- 4. PESTAÑAS ANALÍTICAS ---
 tab_suc, tab_ase, tab_prod, tab_tend = st.tabs([
-    "🏢 Por Sucursal",
-    "👤 Por Asesor",
+    "🏢 Conversión por Sucursal",
+    "👤 Conversión por Asesor",
     "📦 Productos Más Cotizados",
     "📈 Tendencia y Detalle"
 ])
 
 # ==========================================================
-# TAB 1: MONTO COTIZADO POR SUCURSAL Y RAZÓN SOCIAL
+# TAB 1: MONTO Y TASA DE CONVERSIÓN POR SUCURSAL
 # ==========================================================
 with tab_suc:
-    res_suc = (
-        df_f.groupby(["Sucursal", "Razon_Social"], as_index=False)
-        .agg(
-            Folios=("Folio", "count"),
-            Subtotal=("Subtotal", "sum"),
-            Total_MXN=("Total_MXN", "sum"),
-            Ticket_Promedio=("Total_MXN", "mean"),
-            Ticket_Mediano=("Total_MXN", "median"),
-            Ahorro_Volumen=("Ahorro_Volumen", "sum"),
-        )
-        .sort_values("Total_MXN", ascending=False)
-    )
+    res_suc = calcular_tabla_conversion(df_f, ["Sucursal", "Razon_Social"]).sort_values("Total_MXN", ascending=False)
     res_suc["Participacion_Pct"] = (res_suc["Total_MXN"] / monto_total * 100.0) if monto_total > 0 else 0.0
 
-    c_left, c_right = st.columns([1.3, 1.0])
+    c_left, c_right = st.columns([1.25, 1.0])
     with c_left:
-        st.markdown("#### Monto Total Cotizado por Sucursal (MXN)")
+        st.markdown("#### Monto Cotizado por Sucursal y Estatus (MXN)")
         if ALTAIR_OK:
+            suc_est = (
+                df_f.groupby(["Sucursal", "Estatus"], as_index=False)
+                .agg(Total_MXN=("Total_MXN", "sum"), Folios=("Folio", "count"))
+            )
+            orden_suc = res_suc["Sucursal"].tolist()
             chart_suc = (
-                alt.Chart(res_suc)
-                .mark_bar(color=COLOR_AZUL_PRIMARIO, cornerRadiusEnd=4)
+                alt.Chart(suc_est)
+                .mark_bar(cornerRadiusEnd=3)
                 .encode(
-                    x=alt.X("Total_MXN:Q", title="Monto Cotizado ($ MXN)"),
-                    y=alt.Y("Sucursal:N", sort="-x", title=""),
+                    x=alt.X("Total_MXN:Q", title="Monto ($ MXN)"),
+                    y=alt.Y("Sucursal:N", sort=orden_suc, title=""),
+                    color=alt.Color("Estatus:N", scale=alt.Scale(**ESCALA_ESTATUS), legend=alt.Legend(orient="top")),
                     tooltip=[
                         alt.Tooltip("Sucursal:N", title="Sucursal"),
-                        alt.Tooltip("Razon_Social:N", title="Razón Social"),
-                        alt.Tooltip("Folios:Q", title="Cotizaciones"),
-                        alt.Tooltip("Total_MXN:Q", title="Total MXN", format="$,.2f"),
-                        alt.Tooltip("Ticket_Promedio:Q", title="Ticket Promedio", format="$,.2f"),
-                        alt.Tooltip("Participacion_Pct:Q", title="Participación %", format=".1f"),
+                        alt.Tooltip("Estatus:N", title="Estatus"),
+                        alt.Tooltip("Folios:Q", title="Folios"),
+                        alt.Tooltip("Total_MXN:Q", title="Monto MXN", format="$,.2f"),
                     ],
                 )
-                .properties(height=300)
+                .properties(height=310)
             )
             st.altair_chart(chart_suc, use_container_width=True)
         else:
-            st.bar_chart(res_suc.set_index("Sucursal")["Total_MXN"])
+            st.bar_chart(res_suc.set_index("Sucursal")[["Total_MXN", "Monto_Vendido"]])
 
     with c_right:
-        st.markdown("#### Consolidado por Razón Social")
-        res_rs = (
-            df_f.groupby("Razon_Social", as_index=False)
-            .agg(
-                Folios=("Folio", "count"),
-                Total_MXN=("Total_MXN", "sum"),
-                Ticket_Promedio=("Total_MXN", "mean"),
+        st.markdown("#### Tasa de Conversión por Sucursal (% Folios Vendidos)")
+        if ALTAIR_OK:
+            chart_conv_suc = (
+                alt.Chart(res_suc.sort_values("Conv_Folios_Pct", ascending=False))
+                .mark_bar(color=COLOR_VERDE, cornerRadiusEnd=4)
+                .encode(
+                    x=alt.X("Conv_Folios_Pct:Q", title="Conversión (%)", scale=alt.Scale(domain=[0, 100])),
+                    y=alt.Y("Sucursal:N", sort="-x", title=""),
+                    tooltip=[
+                        alt.Tooltip("Sucursal:N", title="Sucursal"),
+                        alt.Tooltip("Vendidas:Q", title="Vendidas"),
+                        alt.Tooltip("Folios:Q", title="Total Folios"),
+                        alt.Tooltip("Conv_Folios_Pct:Q", title="Conv. Folios %", format=".1f"),
+                        alt.Tooltip("Conv_Monto_Pct:Q", title="Conv. Monto %", format=".1f"),
+                    ],
+                )
+                .properties(height=310)
             )
-            .sort_values("Total_MXN", ascending=False)
-        )
-        res_rs["Participacion"] = (res_rs["Total_MXN"] / monto_total * 100.0).map(lambda v: f"{v:.1f}%")
-        st.dataframe(
-            res_rs.assign(
-                Total_MXN=res_rs["Total_MXN"].map(lambda v: f"${v:,.2f}"),
-                Ticket_Promedio=res_rs["Ticket_Promedio"].map(lambda v: f"${v:,.2f}"),
-            ).rename(columns={"Razon_Social": "Razón Social", "Total_MXN": "Total MXN", "Ticket_Promedio": "Ticket Prom."}),
-            use_container_width=True,
-            hide_index=True,
-        )
+            st.altair_chart(chart_conv_suc, use_container_width=True)
+        else:
+            st.bar_chart(res_suc.set_index("Sucursal")["Conv_Folios_Pct"])
+
+    st.markdown("#### Consolidado y Conversión por Razón Social")
+    res_rs = calcular_tabla_conversion(df_f, ["Razon_Social"]).sort_values("Total_MXN", ascending=False)
+    df_rs_show = res_rs[["Razon_Social", "Folios", "Cotizadas", "Vendidas", "Canceladas", "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct"]].copy()
+    df_rs_show["Conv_Folios_Pct"] = df_rs_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
+    df_rs_show["Conv_Monto_Pct"] = df_rs_show["Conv_Monto_Pct"].map(lambda v: f"{v:.1f}%")
+    df_rs_show["Total_MXN"] = df_rs_show["Total_MXN"].map(lambda v: f"${v:,.2f}")
+    df_rs_show["Monto_Vendido"] = df_rs_show["Monto_Vendido"].map(lambda v: f"${v:,.2f}")
+    st.dataframe(
+        df_rs_show.rename(columns={
+            "Razon_Social": "Razón Social",
+            "Conv_Folios_Pct": "Conv. Folios",
+            "Total_MXN": "Monto Cotizado",
+            "Monto_Vendido": "Monto Vendido",
+            "Conv_Monto_Pct": "Conv. Monto",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
 
     st.markdown("#### Tabla Comparativa por Sucursal")
-    df_suc_show = res_suc.copy()
-    df_suc_show["Subtotal"] = df_suc_show["Subtotal"].map(lambda v: f"${v:,.2f}")
-    df_suc_show["Total_MXN"] = df_suc_show["Total_MXN"].map(lambda v: f"${v:,.2f}")
-    df_suc_show["Ticket_Promedio"] = df_suc_show["Ticket_Promedio"].map(lambda v: f"${v:,.2f}")
-    df_suc_show["Ticket_Mediano"] = df_suc_show["Ticket_Mediano"].map(lambda v: f"${v:,.2f}")
-    df_suc_show["Ahorro_Volumen"] = df_suc_show["Ahorro_Volumen"].map(lambda v: f"${v:,.2f}")
-    df_suc_show["Participacion_Pct"] = df_suc_show["Participacion_Pct"].map(lambda v: f"{v:.1f}%")
+    df_suc_show = res_suc[[
+        "Sucursal", "Razon_Social", "Folios", "Cotizadas", "Vendidas", "Canceladas",
+        "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct", "Ticket_Promedio", "Ticket_Vendido"
+    ]].copy()
+    df_suc_show["Conv_Folios_Pct"] = df_suc_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
+    df_suc_show["Conv_Monto_Pct"] = df_suc_show["Conv_Monto_Pct"].map(lambda v: f"{v:.1f}%")
+    for col_m in ["Total_MXN", "Monto_Vendido", "Ticket_Promedio", "Ticket_Vendido"]:
+        df_suc_show[col_m] = df_suc_show[col_m].map(lambda v: f"${v:,.2f}")
     st.dataframe(
         df_suc_show.rename(columns={
             "Razon_Social": "Razón Social",
-            "Total_MXN": "Total MXN",
-            "Ticket_Promedio": "Ticket Promedio",
-            "Ticket_Mediano": "Ticket Mediano",
-            "Ahorro_Volumen": "Ahorro Vol.",
-            "Participacion_Pct": "% Part.",
+            "Conv_Folios_Pct": "Conv. Folios",
+            "Total_MXN": "Cotizado MXN",
+            "Monto_Vendido": "Vendido MXN",
+            "Conv_Monto_Pct": "Conv. Monto",
+            "Ticket_Promedio": "Ticket Prom.",
+            "Ticket_Vendido": "Ticket Vendido",
         }),
         use_container_width=True,
         hide_index=True,
     )
 
 # ==========================================================
-# TAB 2: MONTO COTIZADO Y TICKET PROMEDIO POR ASESOR
+# TAB 2: MONTO Y TASA DE CONVERSIÓN POR ASESOR
 # ==========================================================
 with tab_ase:
-    res_ase = (
-        df_f.groupby("Asesor", as_index=False)
-        .agg(
-            Sucursal_Principal=("Sucursal", lambda s: s.mode().iloc[0] if not s.mode().empty else ""),
-            Folios=("Folio", "count"),
-            Total_MXN=("Total_MXN", "sum"),
-            Ticket_Promedio=("Total_MXN", "mean"),
-            Ticket_Max=("Total_MXN", "max"),
-            Desc_N1=("Desc_Especial_N1", "sum"),
-        )
-        .sort_values("Total_MXN", ascending=False)
-    )
-    res_ase["Participacion_Pct"] = (res_ase["Total_MXN"] / monto_total * 100.0) if monto_total > 0 else 0.0
+    res_ase = calcular_tabla_conversion(df_f, ["Asesor"]).sort_values("Monto_Vendido", ascending=False)
+    suc_modo = df_f.groupby("Asesor")["Sucursal"].agg(lambda s: s.mode().iloc[0] if not s.mode().empty else "").reset_index()
+    res_ase = res_ase.merge(suc_modo, on="Asesor", how="left")
 
     c_a1, c_a2 = st.columns(2)
     with c_a1:
-        st.markdown("#### Ranking por Monto Cotizado (MXN)")
+        st.markdown("#### Monto Cotizado por Asesor y Estatus (MXN)")
         if ALTAIR_OK:
+            top_asesores = res_ase.sort_values("Total_MXN", ascending=False).head(15)["Asesor"].tolist()
+            ase_est = (
+                df_f[df_f["Asesor"].isin(top_asesores)]
+                .groupby(["Asesor", "Estatus"], as_index=False)
+                .agg(Total_MXN=("Total_MXN", "sum"), Folios=("Folio", "count"))
+            )
             chart_ase = (
-                alt.Chart(res_ase.head(15))
-                .mark_bar(color=COLOR_AZUL_CLARO, cornerRadiusEnd=4)
+                alt.Chart(ase_est)
+                .mark_bar(cornerRadiusEnd=3)
                 .encode(
-                    x=alt.X("Total_MXN:Q", title="Monto Cotizado ($ MXN)"),
-                    y=alt.Y("Asesor:N", sort="-x", title=""),
+                    x=alt.X("Total_MXN:Q", title="Monto ($ MXN)"),
+                    y=alt.Y("Asesor:N", sort=top_asesores, title=""),
+                    color=alt.Color("Estatus:N", scale=alt.Scale(**ESCALA_ESTATUS), legend=alt.Legend(orient="top")),
                     tooltip=[
                         alt.Tooltip("Asesor:N", title="Asesor"),
-                        alt.Tooltip("Sucursal_Principal:N", title="Sucursal"),
-                        alt.Tooltip("Folios:Q", title="Cotizaciones"),
-                        alt.Tooltip("Total_MXN:Q", title="Total MXN", format="$,.2f"),
-                        alt.Tooltip("Ticket_Promedio:Q", title="Ticket Promedio", format="$,.2f"),
+                        alt.Tooltip("Estatus:N", title="Estatus"),
+                        alt.Tooltip("Folios:Q", title="Folios"),
+                        alt.Tooltip("Total_MXN:Q", title="Monto MXN", format="$,.2f"),
                     ],
                 )
-                .properties(height=320)
+                .properties(height=330)
             )
             st.altair_chart(chart_ase, use_container_width=True)
         else:
-            st.bar_chart(res_ase.head(15).set_index("Asesor")["Total_MXN"])
+            st.bar_chart(res_ase.head(15).set_index("Asesor")[["Total_MXN", "Monto_Vendido"]])
 
     with c_a2:
-        st.markdown("#### Ticket Promedio por Asesor (MXN)")
+        st.markdown("#### Tasa de Conversión por Asesor (% Folios Vendidos)")
         if ALTAIR_OK:
-            chart_tk = (
-                alt.Chart(res_ase.sort_values("Ticket_Promedio", ascending=False).head(15))
+            chart_conv_ase = (
+                alt.Chart(res_ase.sort_values("Conv_Folios_Pct", ascending=False).head(15))
                 .mark_bar(color=COLOR_DORADO, cornerRadiusEnd=4)
                 .encode(
-                    x=alt.X("Ticket_Promedio:Q", title="Ticket Promedio ($ MXN)"),
+                    x=alt.X("Conv_Folios_Pct:Q", title="Conversión (%)", scale=alt.Scale(domain=[0, 100])),
                     y=alt.Y("Asesor:N", sort="-x", title=""),
                     tooltip=[
                         alt.Tooltip("Asesor:N", title="Asesor"),
+                        alt.Tooltip("Sucursal:N", title="Sucursal"),
+                        alt.Tooltip("Vendidas:Q", title="Vendidas"),
+                        alt.Tooltip("Folios:Q", title="Total Folios"),
+                        alt.Tooltip("Conv_Folios_Pct:Q", title="Conv. Folios %", format=".1f"),
+                        alt.Tooltip("Conv_Monto_Pct:Q", title="Conv. Monto %", format=".1f"),
                         alt.Tooltip("Ticket_Promedio:Q", title="Ticket Promedio", format="$,.2f"),
-                        alt.Tooltip("Ticket_Max:Q", title="Ticket Máximo", format="$,.2f"),
-                        alt.Tooltip("Folios:Q", title="Folios"),
                     ],
                 )
-                .properties(height=320)
+                .properties(height=330)
             )
-            st.altair_chart(chart_tk, use_container_width=True)
+            st.altair_chart(chart_conv_ase, use_container_width=True)
         else:
-            st.bar_chart(res_ase.head(15).set_index("Asesor")["Ticket_Promedio"])
+            st.bar_chart(res_ase.head(15).set_index("Asesor")["Conv_Folios_Pct"])
 
-    st.markdown("#### Desempeño Detallado por Asesor")
-    df_ase_show = res_ase.copy()
-    df_ase_show["Total_MXN"] = df_ase_show["Total_MXN"].map(lambda v: f"${v:,.2f}")
-    df_ase_show["Ticket_Promedio"] = df_ase_show["Ticket_Promedio"].map(lambda v: f"${v:,.2f}")
-    df_ase_show["Ticket_Max"] = df_ase_show["Ticket_Max"].map(lambda v: f"${v:,.2f}")
-    df_ase_show["Desc_N1"] = df_ase_show["Desc_N1"].map(lambda v: f"${v:,.2f}")
-    df_ase_show["Participacion_Pct"] = df_ase_show["Participacion_Pct"].map(lambda v: f"{v:.1f}%")
+    st.markdown("#### Desempeño y Conversión Detallada por Asesor")
+    df_ase_show = res_ase[[
+        "Asesor", "Sucursal", "Folios", "Cotizadas", "Vendidas", "Canceladas",
+        "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct", "Ticket_Promedio", "Desc_N1"
+    ]].copy()
+    df_ase_show["Conv_Folios_Pct"] = df_ase_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
+    df_ase_show["Conv_Monto_Pct"] = df_ase_show["Conv_Monto_Pct"].map(lambda v: f"{v:.1f}%")
+    for col_m in ["Total_MXN", "Monto_Vendido", "Ticket_Promedio", "Desc_N1"]:
+        df_ase_show[col_m] = df_ase_show[col_m].map(lambda v: f"${v:,.2f}")
     st.dataframe(
         df_ase_show.rename(columns={
-            "Sucursal_Principal": "Sucursal",
-            "Total_MXN": "Total MXN",
-            "Ticket_Promedio": "Ticket Promedio",
-            "Ticket_Max": "Ticket Máximo",
-            "Desc_N1": "Desc. N1 Otorgado",
-            "Participacion_Pct": "% Part.",
+            "Conv_Folios_Pct": "Conv. Folios",
+            "Total_MXN": "Cotizado MXN",
+            "Monto_Vendido": "Vendido MXN",
+            "Conv_Monto_Pct": "Conv. Monto",
+            "Ticket_Promedio": "Ticket Prom.",
+            "Desc_N1": "Desc. N1",
         }),
         use_container_width=True,
         hide_index=True,
     )
 
 # ==========================================================
-# TAB 3: PRODUCTOS MÁS COTIZADOS (SKUs, FAMILIAS Y NIVELES)
+# TAB 3: PRODUCTOS MÁS COTIZADOS Y VENDIDOS
 # ==========================================================
 with tab_prod:
     if df_pf.empty:
         st.info("No se encontró desglose de partidas (`Datos_JSON`) en las cotizaciones filtradas.")
     else:
-        criterio_top = st.radio(
-            "Ordenar Top de Productos por:",
-            ["Monto Cotizado ($ MXN sin IVA)", "Cantidad de Piezas", "Frecuencia (Folios)"],
-            horizontal=True,
-        )
-        col_ord = {
-            "Monto Cotizado ($ MXN sin IVA)": "Importe_Neto",
-            "Cantidad de Piezas": "Cantidad",
-            "Frecuencia (Folios)": "Folios",
-        }[criterio_top]
-
-        res_prod = (
-            df_pf.groupby(["Clave", "Producto", "Familia"], as_index=False)
-            .agg(
-                Folios=("Folio", "nunique"),
-                Cantidad=("Cantidad", "sum"),
-                Importe_Neto=("Importe_Neto", "sum"),
+        p_col1, p_col2 = st.columns([2.2, 1.4])
+        with p_col1:
+            criterio_top = st.radio(
+                "Ordenar Top de Productos por:",
+                ["Monto Cotizado ($ MXN sin IVA)", "Cantidad de Piezas", "Frecuencia (Folios)"],
+                horizontal=True,
             )
-            .sort_values(col_ord, ascending=False)
-        )
-        total_neto_prod = float(res_prod["Importe_Neto"].sum())
-        res_prod["Participacion_Pct"] = (res_prod["Importe_Neto"] / total_neto_prod * 100.0) if total_neto_prod > 0 else 0.0
-        res_prod["Etiqueta"] = res_prod["Clave"] + " — " + res_prod["Producto"].str.slice(0, 32)
+        with p_col2:
+            solo_vendidas_prod = st.toggle("Ver solo productos de cotizaciones Vendidas", value=False)
 
-        st.markdown(f"#### Top 10 Productos Más Cotizados ({criterio_top})")
-        top10 = res_prod.head(10)
-        if ALTAIR_OK:
-            chart_prod = (
-                alt.Chart(top10)
-                .mark_bar(color=COLOR_AZUL_PRIMARIO, cornerRadiusEnd=4)
-                .encode(
-                    x=alt.X(f"{col_ord}:Q", title=criterio_top),
-                    y=alt.Y("Etiqueta:N", sort="-x", title=""),
-                    tooltip=[
-                        alt.Tooltip("Clave:N", title="Clave"),
-                        alt.Tooltip("Producto:N", title="Producto"),
-                        alt.Tooltip("Familia:N", title="Familia"),
-                        alt.Tooltip("Folios:Q", title="Folios"),
-                        alt.Tooltip("Cantidad:Q", title="Piezas", format=",.0f"),
-                        alt.Tooltip("Importe_Neto:Q", title="Importe Neto (s/IVA)", format="$,.2f"),
-                    ],
-                )
-                .properties(height=340)
-            )
-            st.altair_chart(chart_prod, use_container_width=True)
+        df_p_use = df_pf[df_pf["Estatus"] == "Vendida"].copy() if solo_vendidas_prod else df_pf.copy()
+
+        if df_p_use.empty:
+            st.info("No hay partidas con estatus Vendida en el rango seleccionado.")
         else:
-            st.bar_chart(top10.set_index("Clave")[col_ord])
+            col_ord = {
+                "Monto Cotizado ($ MXN sin IVA)": "Importe_Neto",
+                "Cantidad de Piezas": "Cantidad",
+                "Frecuencia (Folios)": "Folios",
+            }[criterio_top]
 
-        c_fam, c_niv = st.columns([1.4, 1.0])
-        with c_fam:
-            st.markdown("#### Mezcla por Familia de Materiales")
-            res_fam = (
-                df_pf.groupby("Familia", as_index=False)
-                .agg(Folios=("Folio", "nunique"), Piezas=("Cantidad", "sum"), Importe_Neto=("Importe_Neto", "sum"))
-                .sort_values("Importe_Neto", ascending=False)
+            res_prod = (
+                df_p_use.groupby(["Clave", "Producto", "Familia"], as_index=False)
+                .agg(
+                    Folios=("Folio", "nunique"),
+                    Cantidad=("Cantidad", "sum"),
+                    Importe_Neto=("Importe_Neto", "sum"),
+                )
+                .sort_values(col_ord, ascending=False)
             )
-            res_fam["% Mezcla"] = (res_fam["Importe_Neto"] / total_neto_prod * 100.0).map(lambda v: f"{v:.1f}%")
-            res_fam["Importe_Neto"] = res_fam["Importe_Neto"].map(lambda v: f"${v:,.2f}")
-            res_fam["Piezas"] = res_fam["Piezas"].map(lambda v: f"{v:,.0f}")
-            st.dataframe(res_fam.rename(columns={"Importe_Neto": "Importe (s/IVA)"}), use_container_width=True, hide_index=True)
+            total_neto_prod = float(res_prod["Importe_Neto"].sum())
+            res_prod["Participacion_Pct"] = (res_prod["Importe_Neto"] / total_neto_prod * 100.0) if total_neto_prod > 0 else 0.0
+            res_prod["Etiqueta"] = res_prod["Clave"] + " — " + res_prod["Producto"].str.slice(0, 32)
 
-        with c_niv:
-            st.markdown("#### Distribución Interna por Nivel")
-            res_niv = (
-                df_pf.groupby("Nivel", as_index=False)
-                .agg(Partidas=("Clave", "count"), Importe_Neto=("Importe_Neto", "sum"))
-                .sort_values("Nivel")
+            st.markdown(f"#### Top 10 Productos ({'Vendidos' if solo_vendidas_prod else 'Cotizados'} — {criterio_top})")
+            top10 = res_prod.head(10)
+            if ALTAIR_OK:
+                chart_prod = (
+                    alt.Chart(top10)
+                    .mark_bar(color=COLOR_VERDE if solo_vendidas_prod else COLOR_AZUL_PRIMARIO, cornerRadiusEnd=4)
+                    .encode(
+                        x=alt.X(f"{col_ord}:Q", title=criterio_top),
+                        y=alt.Y("Etiqueta:N", sort="-x", title=""),
+                        tooltip=[
+                            alt.Tooltip("Clave:N", title="Clave"),
+                            alt.Tooltip("Producto:N", title="Producto"),
+                            alt.Tooltip("Familia:N", title="Familia"),
+                            alt.Tooltip("Folios:Q", title="Folios"),
+                            alt.Tooltip("Cantidad:Q", title="Piezas", format=",.0f"),
+                            alt.Tooltip("Importe_Neto:Q", title="Importe Neto (s/IVA)", format="$,.2f"),
+                        ],
+                    )
+                    .properties(height=340)
+                )
+                st.altair_chart(chart_prod, use_container_width=True)
+            else:
+                st.bar_chart(top10.set_index("Clave")[col_ord])
+
+            c_fam, c_niv = st.columns([1.4, 1.0])
+            with c_fam:
+                st.markdown("#### Mezcla por Familia de Materiales")
+                res_fam = (
+                    df_p_use.groupby("Familia", as_index=False)
+                    .agg(Folios=("Folio", "nunique"), Piezas=("Cantidad", "sum"), Importe_Neto=("Importe_Neto", "sum"))
+                    .sort_values("Importe_Neto", ascending=False)
+                )
+                res_fam["% Mezcla"] = (res_fam["Importe_Neto"] / total_neto_prod * 100.0).map(lambda v: f"{v:.1f}%")
+                res_fam["Importe_Neto"] = res_fam["Importe_Neto"].map(lambda v: f"${v:,.2f}")
+                res_fam["Piezas"] = res_fam["Piezas"].map(lambda v: f"{v:,.0f}")
+                st.dataframe(res_fam.rename(columns={"Importe_Neto": "Importe (s/IVA)"}), use_container_width=True, hide_index=True)
+
+            with c_niv:
+                st.markdown("#### Distribución Interna por Nivel")
+                res_niv = (
+                    df_p_use.groupby("Nivel", as_index=False)
+                    .agg(Partidas=("Clave", "count"), Importe_Neto=("Importe_Neto", "sum"))
+                    .sort_values("Nivel")
+                )
+                res_niv["% Monto"] = (res_niv["Importe_Neto"] / total_neto_prod * 100.0).map(lambda v: f"{v:.1f}%")
+                res_niv["Importe_Neto"] = res_niv["Importe_Neto"].map(lambda v: f"${v:,.2f}")
+                st.dataframe(res_niv.rename(columns={"Importe_Neto": "Importe (s/IVA)"}), use_container_width=True, hide_index=True)
+
+            st.markdown("#### Catálogo Detallado de Productos (Top 25)")
+            df_p_show = res_prod.head(25)[["Clave", "Producto", "Familia", "Folios", "Cantidad", "Importe_Neto", "Participacion_Pct"]].copy()
+            df_p_show["Cantidad"] = df_p_show["Cantidad"].map(lambda v: f"{v:,.0f}")
+            df_p_show["Importe_Neto"] = df_p_show["Importe_Neto"].map(lambda v: f"${v:,.2f}")
+            df_p_show["Participacion_Pct"] = df_p_show["Participacion_Pct"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(
+                df_p_show.rename(columns={"Importe_Neto": "Importe (s/IVA)", "Participacion_Pct": "% Part."}),
+                use_container_width=True,
+                hide_index=True,
             )
-            res_niv["% Monto"] = (res_niv["Importe_Neto"] / total_neto_prod * 100.0).map(lambda v: f"{v:.1f}%")
-            res_niv["Importe_Neto"] = res_niv["Importe_Neto"].map(lambda v: f"${v:,.2f}")
-            st.dataframe(res_niv.rename(columns={"Importe_Neto": "Importe (s/IVA)"}), use_container_width=True, hide_index=True)
-
-        st.markdown("#### Catálogo Detallado de Productos Cotizados (Top 25)")
-        df_p_show = res_prod.head(25)[["Clave", "Producto", "Familia", "Folios", "Cantidad", "Importe_Neto", "Participacion_Pct"]].copy()
-        df_p_show["Cantidad"] = df_p_show["Cantidad"].map(lambda v: f"{v:,.0f}")
-        df_p_show["Importe_Neto"] = df_p_show["Importe_Neto"].map(lambda v: f"${v:,.2f}")
-        df_p_show["Participacion_Pct"] = df_p_show["Participacion_Pct"].map(lambda v: f"{v:.1f}%")
-        st.dataframe(
-            df_p_show.rename(columns={"Importe_Neto": "Importe (s/IVA)", "Participacion_Pct": "% Part."}),
-            use_container_width=True,
-            hide_index=True,
-        )
 
 # ==========================================================
-# TAB 4: TENDENCIA DIARIA Y EXPORTACIÓN A EXCEL (CSV)
+# TAB 4: TENDENCIA DIARIA POR ESTATUS Y EXPORTACIÓN CSV
 # ==========================================================
 with tab_tend:
     df_fechas = df_f.dropna(subset=["Fecha_Dia"]).copy()
     if not df_fechas.empty:
-        st.markdown("#### Evolución Diaria del Monto Cotizado (MXN)")
+        st.markdown("#### Evolución Diaria por Estatus (MXN)")
         res_dia = (
-            df_fechas.groupby("Fecha_Dia", as_index=False)
+            df_fechas.groupby(["Fecha_Dia", "Estatus"], as_index=False)
             .agg(Folios=("Folio", "count"), Total_MXN=("Total_MXN", "sum"))
             .sort_values("Fecha_Dia")
         )
@@ -541,35 +639,29 @@ with tab_tend:
         if ALTAIR_OK:
             chart_dia = (
                 alt.Chart(res_dia)
-                .mark_area(
-                    line={"color": COLOR_AZUL_PRIMARIO, "strokeWidth": 2.5},
-                    color=alt.Gradient(
-                        gradient="linear",
-                        stops=[
-                            alt.GradientStop(color="#E8F0FE", offset=0),
-                            alt.GradientStop(color="#0096FF", offset=1),
-                        ],
-                        x1=1, x2=1, y1=1, y2=0,
-                    ),
-                    point={"color": COLOR_DORADO, "size": 55},
-                )
+                .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
                 .encode(
                     x=alt.X("Fecha_Str:N", title="Fecha"),
-                    y=alt.Y("Total_MXN:Q", title="Monto Cotizado ($ MXN)"),
+                    y=alt.Y("Total_MXN:Q", title="Monto ($ MXN)"),
+                    color=alt.Color("Estatus:N", scale=alt.Scale(**ESCALA_ESTATUS), legend=alt.Legend(orient="top")),
                     tooltip=[
                         alt.Tooltip("Fecha_Str:N", title="Fecha"),
+                        alt.Tooltip("Estatus:N", title="Estatus"),
                         alt.Tooltip("Folios:Q", title="Cotizaciones"),
-                        alt.Tooltip("Total_MXN:Q", title="Total MXN", format="$,.2f"),
+                        alt.Tooltip("Total_MXN:Q", title="Monto MXN", format="$,.2f"),
                     ],
                 )
                 .properties(height=280)
             )
             st.altair_chart(chart_dia, use_container_width=True)
         else:
-            st.line_chart(res_dia.set_index("Fecha_Str")["Total_MXN"])
+            st.bar_chart(res_dia.pivot(index="Fecha_Str", columns="Estatus", values="Total_MXN").fillna(0))
 
     st.markdown("#### Base Filtrada de Cotizaciones")
-    cols_exp = ["Folio", "Fecha_Texto", "Sucursal", "Razon_Social", "Asesor", "Cliente", "Partidas", "Subtotal", "IVA", "Total_MXN", "Ahorro_Volumen", "Desc_Especial_N1"]
+    cols_exp = [
+        "Folio", "Estatus", "Fecha_Texto", "Sucursal", "Razon_Social", "Asesor",
+        "Cliente", "Partidas", "Subtotal", "IVA", "Total_MXN", "Ahorro_Volumen", "Desc_Especial_N1"
+    ]
     df_export = df_f[cols_exp].sort_values("Folio", ascending=False)
     st.dataframe(
         df_export.assign(
@@ -591,9 +683,9 @@ with tab_tend:
 
     csv_bytes = df_export.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        label="⬇️ EXPORTAR REPORTE FILTRADO A EXCEL (CSV)",
+        label="⬇️ EXPORTAR REPORTE CON ESTATUS A EXCEL (CSV)",
         data=csv_bytes,
-        file_name=f"Dashboard_Cotizaciones_IMAC_{ahora_mx().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"Dashboard_Conversion_IMAC_{ahora_mx().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         use_container_width=True,
     )
