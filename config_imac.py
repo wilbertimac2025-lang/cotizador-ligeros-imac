@@ -6,6 +6,7 @@ import datetime
 from zoneinfo import ZoneInfo
 import json
 import os
+import re
 import smtplib
 import unicodedata
 from email.message import EmailMessage
@@ -43,7 +44,7 @@ CONFIG_SUCURSALES = {
         "clabe": "012905001345083942",
         "leyenda_entrega": "Precios de contado Libre Abordo Veracruz, Ver.",
         "leyenda_extra": "",
-        "prefijo_folio": "IMAC"
+        "prefijo_folio": "IVR"
     },
     "IMACRIL CENTRO": {
         "nombre_oficial": "IMACRIL S.A. DE C.V.",
@@ -58,7 +59,7 @@ CONFIG_SUCURSALES = {
         "clabe": "012905004476083148",
         "leyenda_entrega": "Precios de contado Libre Abordo Veracruz, Ver.",
         "leyenda_extra": "",
-        "prefijo_folio": "CENT"
+        "prefijo_folio": "IMC"
     },
     "EJÉRCITO": {
         "nombre_oficial": "TARC S.A. DE C.V.",
@@ -73,7 +74,7 @@ CONFIG_SUCURSALES = {
         "clabe": "012905001539477500",
         "leyenda_entrega": "Precios de contado Libre Abordo Boca del Río, Ver.",
         "leyenda_extra": "",
-        "prefijo_folio": "EJER"
+        "prefijo_folio": "EJE"
     },
     "BOCA DEL RÍO": {
         "nombre_oficial": "TARC S.A. DE C.V.",
@@ -88,7 +89,7 @@ CONFIG_SUCURSALES = {
         "clabe": "012905001313496943",
         "leyenda_entrega": "Precios de contado Libre Abordo Boca del Río, Ver.",
         "leyenda_extra": "",
-        "prefijo_folio": "BOCA"
+        "prefijo_folio": "FRB"
     },
     "FRAMBOYANES": {
         "nombre_oficial": "TARC S.A. DE C.V.",
@@ -103,7 +104,7 @@ CONFIG_SUCURSALES = {
         "clabe": "012905001602905488",
         "leyenda_entrega": "Precios de contado Libre Abordo Destino",
         "leyenda_extra": "",
-        "prefijo_folio": "FRAM"
+        "prefijo_folio": "FFB"
     },
     "RIVIERA": {
         "nombre_oficial": "TARC S.A. DE C.V.",
@@ -285,16 +286,24 @@ def registrar_bitacora(doc, modulo, accion):
         pass
 
 def obtener_nuevo_folio(doc, prefijo):
-    anio = ahora_mx().strftime("%y")
+    """Genera folio corto e independiente por sucursal (ej. IVR-0001) sin duplicados."""
+    prefijo_clean = str(prefijo or "IVR").strip().upper()
+    patron = re.compile(rf"^{re.escape(prefijo_clean)}-(\d+)$", re.IGNORECASE)
+    max_num = 0
     try:
         if doc:
             hoja = doc.worksheet("Cotizaciones")
-            filas = hoja.get_all_values()
-            consecutivo = len(filas) if len(filas) > 0 else 1
-            return f"LIG-{prefijo}-{consecutivo:04d}-{anio}"
+            col_folios = hoja.col_values(1)
+            for val in col_folios:
+                m = patron.match(str(val or "").strip())
+                if m:
+                    num = int(m.group(1))
+                    if num > max_num:
+                        max_num = num
+            return f"{prefijo_clean}-{max_num + 1:04d}"
     except Exception:
         pass
-    return f"LIG-{prefijo}-{ahora_mx().strftime('%H%M')}-{anio}"
+    return f"{prefijo_clean}-{ahora_mx().strftime('%H%M')}"
 
 def limpiar_monto(valor):
     if valor is None or str(valor).strip() == "":
