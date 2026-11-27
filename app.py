@@ -13,7 +13,7 @@ from config_imac import (
 # --- CONFIGURACIÓN DE PÁGINA ---
 icono_nav = "logo_imac_2026.png" if os.path.exists("logo_imac_2026.png") else "🏢"
 st.set_page_config(
-    page_title="Acceso | Cotizador Sistemas Ligeros IMAC",
+    page_title="Acceso | Cotizador Prospección IMAC",
     page_icon=icono_nav,
     layout="centered"
 )
