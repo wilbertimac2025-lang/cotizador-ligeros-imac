@@ -80,7 +80,7 @@ with col_l:
     else:
         st.markdown("### 🏢 IMAC")
 with col_t:
-    st.title("Cotizador Sistemas Ligeros")
+    st.title("Cotizador Prospección Grupo IMAC")
     st.caption("Plataforma Comercial de Mostrador — Zona Veracruz")
 
 st.markdown("---")
