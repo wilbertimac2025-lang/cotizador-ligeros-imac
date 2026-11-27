@@ -4,6 +4,7 @@ from google.oauth2.service_account import Credentials
 from fpdf import FPDF
 import datetime
 from zoneinfo import ZoneInfo
+import io
 import json
 import os
 import re
@@ -11,11 +12,22 @@ import smtplib
 import unicodedata
 from email.message import EmailMessage
 
+try:
+    from pypdf import PdfReader, PdfWriter
+    PYPDF_OK = True
+except Exception:
+    try:
+        from PyPDF2 import PdfReader, PdfWriter
+        PYPDF_OK = True
+    except Exception:
+        PYPDF_OK = False
+
 # --- REGLAS COMERCIALES INTERNAS (OCULTAS EN PANTALLA PARA TODOS) ---
 MIN_PZAS_NIVEL_2 = 50
 MIN_PZAS_NIVEL_3 = 60
 MAX_DESC_PCT = 10.0  # Límite máximo permitido de descuento (10%)
 PRECIOS_INCLUYEN_IVA = False  # False = Precios más 16% IVA | True = Precios con IVA incluido
+CARPETA_FICHAS = "fichas_tecnicas"  # Carpeta recomendada en GitHub (también busca en la raíz como respaldo)
 
 # --- ZONA HORARIA LOCAL (VERACRUZ / MÉXICO CENTRO) ---
 def ahora_mx():
@@ -201,6 +213,57 @@ CATALOGO_LIGEROS = {
     "IP050102": {"producto": "MASTER PRIM \"A\" CUB. 19 LTS.", "categoria": "Impermeabilizantes y Recubrimientos", "unidad": "PZA", "n1": 800.00, "n2": 800.00, "n3": 800.00}
 }
 
+# --- MAPA EXACTO DE FICHAS TÉCNICAS (42 SKUs -> 14 ARCHIVOS ÚNICOS DE FICHAS.xlsx) ---
+# Nota: Si deseas incluir también los 4 perfiles USG iniciales (US010201-US010204), solo descomenta esas 4 líneas.
+FICHAS_TECNICAS_MAP = {
+    "US010604": "ultraligh_fichatecnica",
+    "US010301": "basecoat_fichatecnica",
+    "US010305": "redimix_fichatecnica",
+    "US010306": "redimix_fichatecnica",
+    "US010307": "redimix_fichatecnica",
+    "US010605": "antimoho_fichastecnicas",
+    "US010601": "durock_fichatecnica",
+    "US010610-11-12": "texturizado_fichatecnicausg",
+    "US101131": "radar_fichatecnica",
+    "US101132": "radar_fichatecnica",
+    # "US010201": "metalesusg_fichatecnica",
+    # "US010202": "metalesusg_fichatecnica",
+    # "US010203": "metalesusg_fichatecnica",
+    # "US010204": "metalesusg_fichatecnica",
+    "US010205": "metalesusg_fichatecnica",
+    "US010206": "metalesusg_fichatecnica",
+    "US010208": "metalesusg_fichatecnica",
+    "US010209": "metalesusg_fichatecnica",
+    "US010210": "metalesusg_fichatecnica",
+    "US010211": "metalesusg_fichatecnica",
+    "US010212": "metalesusg_fichatecnica",
+    "US010213": "metalesusg_fichatecnica",
+    "US010214": "metalesusg_fichatecnica",
+    "US010215": "metalesusg_fichatecnica",
+    "US010216": "metalesusg_fichatecnica",
+    "US010218": "metalesusg_fichatecnica",
+    "US010220": "metalesusg_fichatecnica",
+    "US010222": "metalesusg_fichatecnica",
+    "US010223": "metalesusg_fichatecnica",
+    "US010225": "metalesusg_fichatecnica",
+    "US010226": "metalesusg_fichatecnica",
+    "US010100": "metalesusg_fichatecnica",
+    "US010101": "suspensiondx_fichatecnica",
+    "US010102": "suspensiondx_fichatecnica",
+    "US010103": "suspensiondx_fichatecnica",
+    "US010310": "yesosupremo_fichatecnica",
+    "US010312": "yesosupermold_fichatecnica",
+    "IP050701-IP050702": "masster_fichatecnica",
+    "IP050709-IP050710": "masster_fichatecnica",
+    "IP050712-IP050713": "masster_fichatecnica",
+    "IP050715-IP050716": "masster_fichatecnica",
+    "IP050718-IP050719": "masster_fichatecnica",
+    "IP050704": "masster_fichatecnica",
+    "IMA030101": "imperimac_fichatecnica",
+    "IMA030102": "imperimac_fichatecnica",
+    "IP050102": "masterprima_fichatecnica",
+}
+
 # --- FUNCIONES DE NORMALIZACIÓN Y RESOLUCIÓN DE SUCURSAL ---
 def normalizar_texto(texto):
     s = str(texto or "").strip().lower()
@@ -241,6 +304,115 @@ def buscar_imagen(nombres_posibles):
         if os.path.exists(nombre):
             return nombre
     return None
+
+# --- MOTOR DE BÚSQUEDA, DEDUPLICACIÓN Y FUSIÓN DE FICHAS TÉCNICAS ---
+def buscar_archivo_ficha(nombre_base):
+    """Busca la ficha técnica en fichas_tecnicas/ o raíz, tolerando mayúsculas/minúsculas y extensión (.pdf/.png/.jpg)."""
+    base_clean = str(nombre_base or "").strip()
+    if not base_clean:
+        return None
+    objetivo_lower = base_clean.lower()
+    exts_validas = (".pdf", ".png", ".jpg", ".jpeg")
+
+    directorios = [CARPETA_FICHAS, "."]
+    for carpeta in directorios:
+        if not os.path.isdir(carpeta):
+            continue
+        # 1) Búsqueda directa rápida
+        for ext in ("", ".pdf", ".PDF", ".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG"):
+            cand = os.path.join(carpeta, base_clean + ext) if carpeta != "." else (base_clean + ext)
+            if os.path.isfile(cand):
+                return cand
+        # 2) Búsqueda insensible a mayúsculas/minúsculas dentro del directorio
+        try:
+            for archivo in os.listdir(carpeta):
+                ruta = os.path.join(carpeta, archivo) if carpeta != "." else archivo
+                if not os.path.isfile(ruta):
+                    continue
+                stem, ext = os.path.splitext(archivo)
+                if archivo.lower() == objetivo_lower or (stem.lower() == objetivo_lower and ext.lower() in exts_validas):
+                    return ruta
+        except Exception:
+            continue
+    return None
+
+def obtener_fichas_unicas_carrito(carrito):
+    """Devuelve lista ordenada y SIN DUPLICADOS de fichas técnicas correspondientes a las partidas del carrito."""
+    fichas_unicas = []
+    vistas = set()
+    for item in carrito:
+        clave = str(item.get("clave", "")).strip()
+        ficha_base = FICHAS_TECNICAS_MAP.get(clave)
+        if not ficha_base:
+            continue
+        ficha_key = ficha_base.strip().lower()
+        if ficha_key in vistas:
+            continue
+        vistas.add(ficha_key)
+        fichas_unicas.append(ficha_base.strip())
+    return fichas_unicas
+
+def convertir_imagen_a_pdf_bytes(ruta_img):
+    """Convierte una ficha técnica en imagen (PNG/JPG) a una página PDF A4 proporcional."""
+    from PIL import Image
+    im = Image.open(ruta_img)
+    w_px, h_px = im.size
+    pdf_img = FPDF(unit="mm", format="A4")
+    pdf_img.add_page()
+    max_w, max_h = 190.0, 277.0
+    escala = min(max_w / float(w_px), max_h / float(h_px))
+    w_mm = w_px * escala
+    h_mm = h_px * escala
+    x_pos = (210.0 - w_mm) / 2.0
+    y_pos = (297.0 - h_mm) / 2.0
+    pdf_img.image(ruta_img, x=x_pos, y=y_pos, w=w_mm, h=h_mm)
+    return pdf_img.output(dest="S").encode("latin-1")
+
+def anexar_fichas_a_pdf(pdf_base_bytes, carrito):
+    """Une al final del PDF de la cotización las fichas técnicas únicas (0 repeticiones)."""
+    if not PYPDF_OK:
+        return pdf_base_bytes
+
+    fichas_unicas = obtener_fichas_unicas_carrito(carrito)
+    if not fichas_unicas:
+        return pdf_base_bytes
+
+    rutas_encontradas = []
+    for ficha_base in fichas_unicas:
+        ruta = buscar_archivo_ficha(ficha_base)
+        if ruta and ruta not in rutas_encontradas:
+            rutas_encontradas.append(ruta)
+
+    if not rutas_encontradas:
+        return pdf_base_bytes
+
+    try:
+        writer = PdfWriter()
+        base_reader = PdfReader(io.BytesIO(pdf_base_bytes))
+        for page in base_reader.pages:
+            writer.add_page(page)
+
+        for ruta in rutas_encontradas:
+            try:
+                ext = os.path.splitext(ruta)[1].lower()
+                if ext == ".pdf":
+                    ficha_reader = PdfReader(ruta)
+                    for page in ficha_reader.pages:
+                        writer.add_page(page)
+                elif ext in (".png", ".jpg", ".jpeg"):
+                    img_pdf_bytes = convertir_imagen_a_pdf_bytes(ruta)
+                    img_reader = PdfReader(io.BytesIO(img_pdf_bytes))
+                    for page in img_reader.pages:
+                        writer.add_page(page)
+            except Exception:
+                # Si una ficha individual está dañada, continúa sin bloquear la cotización
+                continue
+
+        salida = io.BytesIO()
+        writer.write(salida)
+        return salida.getvalue()
+    except Exception:
+        return pdf_base_bytes
 
 # --- CONEXIÓN GOOGLE SHEETS Y BITÁCORA ---
 def obtener_secreto(clave):
@@ -441,7 +613,7 @@ def calcular_totales_carrito(carrito, flete, desc_extra_pct, precios_incluyen_iv
 def limpiar_pdf_txt(texto):
     return str(texto).encode("latin-1", "replace").decode("latin-1")
 
-# --- GENERADOR PDF CORPORATIVO CUADRADO AL MILÍMETRO (SIN N1/N2/N3 NI % DE DESCUENTO) ---
+# --- GENERADOR PDF CORPORATIVO CUADRADO AL MILÍMETRO (CON ANEXO AUTOMÁTICO DE FICHAS TÉCNICAS) ---
 class PDFCorporativoIMAC(FPDF):
     def __init__(self, suc_info, folio_txt, fecha_hora_txt):
         super().__init__()
@@ -539,7 +711,8 @@ def generar_pdf_mostrador(
     desc_extra_pct,
     precios_incluyen_iva,
     notas,
-    mostrar_col_desc=False
+    mostrar_col_desc=False,
+    incluir_fichas=True
 ):
     # Hora local de Veracruz / México (formato 24h con hrs)
     fecha_hora = ahora_mx().strftime("%d/%m/%Y %H:%M hrs")
@@ -673,7 +846,6 @@ def generar_pdf_mostrador(
 
     # --- BLOQUE DE CIERRE: FIRMA ASESOR (IZQ) + TARJETA BBVA (DER) ---
     y_cierre = max(y_fin_izq, y_fin_der) + 7
-    # Altura fija de cierre = 38 mm -> si y_cierre > 205 salta de página para NO tocar footer (y=250)
     if y_cierre > 205:
         pdf.add_page()
         y_cierre = pdf.get_y() + 2
@@ -719,7 +891,6 @@ def generar_pdf_mostrador(
 
     img_bbva = buscar_imagen(["logo_bbva.png", "logo_bbva.jpg", "logo_bbva.jpeg"])
     if img_bbva:
-        # 233x69 -> 24x7.11 mm en y_cierre + 3.5..10.61
         pdf.image(img_bbva, x=117.5, y=y_cierre + 3.5, w=24)
         y_txt_bank = y_cierre + 13.0
     else:
@@ -744,8 +915,14 @@ def generar_pdf_mostrador(
     )
     pdf.multi_cell(80, 4.8, limpiar_pdf_txt(bloque_banco))
 
+    pdf_final_bytes = pdf.output(dest="S").encode("latin-1")
+
+    # Anexar automáticamente las fichas técnicas únicas al final del PDF (sin repeticiones)
+    if incluir_fichas:
+        pdf_final_bytes = anexar_fichas_a_pdf(pdf_final_bytes, carrito)
+
     return (
-        pdf.output(dest="S").encode("latin-1"),
+        pdf_final_bytes,
         tot["total_final"],
         tot["subtotal_sin_iva"],
         tot["iva_monto"],
