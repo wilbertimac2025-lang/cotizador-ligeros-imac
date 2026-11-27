@@ -2,6 +2,7 @@ import streamlit as st
 import datetime
 import json
 import os
+import re
 import sys
 import pandas as pd
 from PIL import Image
@@ -37,7 +38,7 @@ if not st.session_state.get("logged_in", False):
     st.warning("⚠️ Acceso denegado. Inicia sesión primero en la página principal (`app`).")
     st.stop()
 
-# --- CATÁLOGO DE ESTATUS OFICIALES ---
+# --- CATÁLOGO DE ESTATUS Y VALIDACIÓN DE FACTURA SAE ---
 ESTATUS_OPCIONES = ["Cotizada", "Vendida", "Cancelada"]
 BADGE_ESTATUS = {
     "Cotizada": "🟡 Cotizada",
@@ -53,6 +54,24 @@ def normalizar_estatus(valor_raw):
         return "Cancelada"
     return "Cotizada"
 
+def normalizar_folio_factura(raw):
+    """Elimina espacios internos y convierte a mayúsculas (ej. ' brt-t01 ' -> 'BRT-T01')."""
+    return re.sub(r"\s+", "", str(raw or "").strip().upper())
+
+def validar_folio_factura_sae(raw):
+    """Valida formato flexible para facturas SAE (ej. BRT-T01, IVR-T0145, 45821) bloqueando textos basura."""
+    clean = normalizar_folio_factura(raw)
+    if not clean:
+        return False, "Debes capturar el folio de factura SAE para marcar la cotización como Vendida.", ""
+    solo_alnum = re.sub(r"[^A-Z0-9]", "", clean)
+    if len(solo_alnum) < 4:
+        return False, "El folio de factura SAE debe tener al menos 4 caracteres alfanuméricos (ej. BRT-T01).", clean
+    if not re.search(r"\d", solo_alnum):
+        return False, "El folio de factura SAE debe incluir al menos un número (ej. BRT-T01).", clean
+    if not re.fullmatch(r"[A-Z0-9\-/]+", clean):
+        return False, "Solo se permiten letras, números y guiones en el folio de factura SAE.", clean
+    return True, "OK", clean
+
 def extraer_estatus_fila(fila):
     """Lee el Estatus desde la Columna N (índice 13) con respaldo en Datos_JSON y valor por defecto Cotizada."""
     if len(fila) > 13 and str(fila[13]).strip():
@@ -65,6 +84,40 @@ def extraer_estatus_fila(fila):
         except Exception:
             pass
     return "Cotizada"
+
+def extraer_factura_fila(fila):
+    """Lee el No. de Factura SAE desde la Columna O (índice 14) con respaldo en Datos_JSON."""
+    if len(fila) > 14 and str(fila[14]).strip():
+        return normalizar_folio_factura(fila[14])
+    if len(fila) > 12 and str(fila[12]).strip():
+        try:
+            payload = json.loads(fila[12])
+            if payload.get("no_factura"):
+                return normalizar_folio_factura(payload.get("no_factura"))
+        except Exception:
+            pass
+    return ""
+
+def buscar_factura_duplicada(filas_hoja, factura_clean, folio_actual):
+    """Verifica que el folio de factura SAE no haya sido usado en otra cotización activa/vendida."""
+    if not factura_clean:
+        return None
+    folio_actual_str = str(folio_actual or "").strip()
+    for idx, fila in enumerate(filas_hoja):
+        if idx == 0 and len(fila) > 0 and "FOLIO" in str(fila[0]).upper():
+            continue
+        if len(fila) < 1 or not str(fila[0]).strip():
+            continue
+        folio_f = str(fila[0]).strip()
+        if folio_f == folio_actual_str:
+            continue
+        est_f = extraer_estatus_fila(fila)
+        if est_f == "Cancelada":
+            continue
+        fac_f = extraer_factura_fila(fila)
+        if fac_f and fac_f == factura_clean:
+            return folio_f
+    return None
 
 def localizar_fila_folio(hoja, folio_objetivo, fila_idx_sugerida):
     fila_real = fila_idx_sugerida
@@ -84,36 +137,41 @@ def localizar_fila_folio(hoja, folio_objetivo, fila_idx_sugerida):
         )
     return fila_real
 
-def asegurar_encabezado_estatus(hoja):
-    """Asegura que la celda N1 tenga el encabezado 'Estatus' si todavía está vacía."""
+def asegurar_encabezados_control(hoja):
+    """Asegura que N1='Estatus' y O1='No_Factura' existan en la hoja Cotizaciones."""
     try:
-        val_n1 = str(hoja.cell(1, 14).value or "").strip()
-        if not val_n1:
+        if not str(hoja.cell(1, 14).value or "").strip():
             hoja.update_cell(1, 14, "Estatus")
+        if not str(hoja.cell(1, 15).value or "").strip():
+            hoja.update_cell(1, 15, "No_Factura")
     except Exception:
         pass
 
-def actualizar_fila_cotizacion_con_estatus(hoja, folio_objetivo, fila_idx_sugerida, valores_fila_14):
-    """Sobrescribe A:N (14 columnas, incluyendo Estatus) sin duplicar registros."""
+def actualizar_fila_cotizacion_completa(hoja, folio_objetivo, fila_idx_sugerida, valores_fila_15):
+    """Sobrescribe A:O (15 columnas, incluyendo Estatus y No_Factura) sin duplicar registros."""
     fila_real = localizar_fila_folio(hoja, folio_objetivo, fila_idx_sugerida)
     if not fila_real:
         return False, "No se encontró el folio en la pestaña Cotizaciones."
-    asegurar_encabezado_estatus(hoja)
-    rango = f"A{fila_real}:N{fila_real}"
+    asegurar_encabezados_control(hoja)
+    rango = f"A{fila_real}:O{fila_real}"
     try:
-        hoja.update(values=[valores_fila_14], range_name=rango)
+        hoja.update(values=[valores_fila_15], range_name=rango)
     except TypeError:
-        hoja.update(rango, [valores_fila_14])
-    return True, f"Fila {fila_real} actualizada (A:N)."
+        hoja.update(rango, [valores_fila_15])
+    return True, f"Fila {fila_real} actualizada (A:O)."
 
-def actualizar_solo_estatus_folio(hoja, folio_objetivo, fila_idx_sugerida, nuevo_estatus):
-    """Actualiza únicamente la Columna N (Estatus) para cambios rápidos sin regenerar el PDF."""
+def actualizar_estatus_y_factura_rapido(hoja, folio_objetivo, fila_idx_sugerida, nuevo_estatus, no_factura_clean):
+    """Actualiza únicamente las Columnas N (Estatus) y O (No_Factura) sin regenerar PDF."""
     fila_real = localizar_fila_folio(hoja, folio_objetivo, fila_idx_sugerida)
     if not fila_real:
         return False, "No se encontró el folio en la pestaña Cotizaciones."
-    asegurar_encabezado_estatus(hoja)
-    hoja.update_cell(fila_real, 14, nuevo_estatus)
-    return True, f"Estatus actualizado en fila {fila_real} (Columna N)."
+    asegurar_encabezados_control(hoja)
+    rango = f"N{fila_real}:O{fila_real}"
+    try:
+        hoja.update(values=[[nuevo_estatus, no_factura_clean]], range_name=rango)
+    except TypeError:
+        hoja.update(rango, [[nuevo_estatus, no_factura_clean]])
+    return True, f"Fila {fila_real} actualizada (N:O)."
 
 # --- ESTADO DE EDICIÓN ---
 defaults_ed = {
@@ -124,6 +182,8 @@ defaults_ed = {
     "ed_total_anterior": 0.0,
     "ed_estatus_anterior": "Cotizada",
     "ed_estatus": "Cotizada",
+    "ed_no_factura": "",
+    "ed_factura_anterior": "",
     "ed_pdf_bytes": None,
     "ed_pdf_nombre": "",
     "ed_asesor_tel": "",
@@ -143,6 +203,7 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
     tel_f = str(fila[5]).strip() if len(fila) > 5 else ""
     total_ant = limpiar_monto(fila[10]) if len(fila) > 10 else 0.0
     estatus_f = extraer_estatus_fila(fila)
+    factura_f = extraer_factura_fila(fila)
 
     partidas = []
     flete_f = 0.0
@@ -196,6 +257,8 @@ def cargar_cotizacion_en_editor(fila, fila_idx):
     st.session_state["ed_total_anterior"] = total_ant
     st.session_state["ed_estatus_anterior"] = estatus_f
     st.session_state["ed_estatus"] = estatus_f
+    st.session_state["ed_no_factura"] = factura_f
+    st.session_state["ed_factura_anterior"] = factura_f
     st.session_state["ed_cliente"] = cliente_f
     st.session_state["ed_telefono"] = tel_f
     st.session_state["ed_correo"] = correo_f
@@ -233,7 +296,7 @@ with col_logo:
         st.markdown("### 🏢 IMAC")
 with col_tit:
     st.title("Historial, Estatus y Edición de Cotizaciones")
-    st.caption("Consulta folios guardados, actualiza su estatus (Cotizada / Vendida / Cancelada), ajusta partidas y regenera el PDF")
+    st.caption("Consulta folios guardados, actualiza estatus (con folio de factura SAE obligatorio al vender), ajusta partidas y regenera PDF")
 st.markdown("---")
 
 doc = conectar_sheets()
@@ -259,7 +322,8 @@ for idx, fila in enumerate(todas_filas):
     if not puede_ver_todas and suc_fila != suc_usuario:
         continue
     est_fila = extraer_estatus_fila(fila)
-    registros_disponibles.append((idx + 1, fila, suc_fila, est_fila))
+    fac_fila = extraer_factura_fila(fila)
+    registros_disponibles.append((idx + 1, fila, suc_fila, est_fila, fac_fila))
 
 registros_disponibles.reverse()
 
@@ -267,10 +331,9 @@ if not registros_disponibles:
     st.info("No hay cotizaciones guardadas todavía para tu sucursal.")
     st.stop()
 
-# KPIs rápidos con tasa de conversión en vivo
 total_folios_vis = len(registros_disponibles)
-vendidas_vis = [f for _, f, _, est in registros_disponibles if est == "Vendida"]
-monto_cot_vis = sum(limpiar_monto(f[10]) for _, f, _, _ in registros_disponibles if len(f) > 10)
+vendidas_vis = [f for _, f, _, est, _ in registros_disponibles if est == "Vendida"]
+monto_cot_vis = sum(limpiar_monto(f[10]) for _, f, _, _, _ in registros_disponibles if len(f) > 10)
 monto_ven_vis = sum(limpiar_monto(f[10]) for f in vendidas_vis if len(f) > 10)
 conv_folios_vis = (len(vendidas_vis) / total_folios_vis * 100.0) if total_folios_vis > 0 else 0.0
 conv_monto_vis = (monto_ven_vis / monto_cot_vis * 100.0) if monto_cot_vis > 0 else 0.0
@@ -287,7 +350,7 @@ st.subheader("🔎 Buscar Cotización Guardada")
 col_f1, col_f2, col_f3 = st.columns([1.2, 1.1, 2.2])
 with col_f1:
     if puede_ver_todas:
-        sucursales_en_datos = ["TODAS"] + sorted(list({s_norm for _, _, s_norm, _ in registros_disponibles}))
+        sucursales_en_datos = ["TODAS"] + sorted(list({s_norm for _, _, s_norm, _, _ in registros_disponibles}))
         filtro_suc = st.selectbox("Filtrar por Sucursal:", sucursales_en_datos)
     else:
         filtro_suc = suc_usuario
@@ -295,40 +358,42 @@ with col_f1:
 with col_f2:
     filtro_estatus = st.selectbox("Filtrar por Estatus:", ["TODOS"] + ESTATUS_OPCIONES)
 with col_f3:
-    filtro_texto = st.text_input("Buscar por Folio, Cliente o Asesor:", placeholder="Ej. LIG-IMAC-0001-26 o Constructora...")
+    filtro_texto = st.text_input("Buscar por Folio, Factura SAE, Cliente o Asesor:", placeholder="Ej. FRB-0001, BRT-T01 o Constructora...")
 
 registros_filtrados = []
-for fila_idx, fila, suc_norm, est_fila in registros_disponibles:
+for fila_idx, fila, suc_norm, est_fila, fac_fila in registros_disponibles:
     if filtro_suc != "TODAS" and suc_norm != filtro_suc:
         continue
     if filtro_estatus != "TODOS" and est_fila != filtro_estatus:
         continue
     if filtro_texto.strip():
         q = filtro_texto.strip().upper()
-        bloque_busq = f"{fila[0]} {fila[3]} {fila[4]}".upper()
+        bloque_busq = f"{fila[0]} {fac_fila} {fila[3]} {fila[4]}".upper()
         if q not in bloque_busq:
             continue
-    registros_filtrados.append((fila_idx, fila, suc_norm, est_fila))
+    registros_filtrados.append((fila_idx, fila, suc_norm, est_fila, fac_fila))
 
 if registros_filtrados:
     df_hist = pd.DataFrame([
         {
             "Folio": f[0],
             "Estatus": BADGE_ESTATUS.get(est_f, est_f),
+            "Factura SAE": fac_f if fac_f else "—",
             "Fecha": f[1] if len(f) > 1 else "",
             "Sucursal": s_norm,
-            "Razón Social": CONFIG_SUCURSALES.get(s_norm, {}).get("razon_social", ""),
             "Asesor": f[3] if len(f) > 3 else "",
             "Cliente": f[4] if len(f) > 4 else "",
             "Total MXN": f"${limpiar_monto(f[10]):,.2f}" if len(f) > 10 else "$0.00"
         }
-        for _, f, s_norm, est_f in registros_filtrados
+        for _, f, s_norm, est_f, fac_f in registros_filtrados
     ])
     st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
     mapa_folios = {
-        f"{f[0]} | {BADGE_ESTATUS.get(est_f, est_f)} | {s_norm} | {f[4]} (${limpiar_monto(f[10]):,.2f})": (fila_idx, f)
-        for fila_idx, f, s_norm, est_f in registros_filtrados
+        f"{f[0]} | {BADGE_ESTATUS.get(est_f, est_f)}"
+        + (f" [{fac_f}]" if fac_f else "")
+        + f" | {s_norm} | {f[4]} (${limpiar_monto(f[10]):,.2f})": (fila_idx, f)
+        for fila_idx, f, s_norm, est_f, fac_f in registros_filtrados
     }
     col_sel, col_btn = st.columns([3.2, 1.2])
     with col_sel:
@@ -344,7 +409,7 @@ else:
     st.warning("No se encontraron cotizaciones con esos criterios de búsqueda.")
 
 # ==========================================================
-# ✏️ SECCIÓN 2: EDITOR DE LA COTIZACIÓN CARGADA + ESTATUS
+# ✏️ SECCIÓN 2: EDITOR + ESTATUS + FACTURA SAE OBLIGATORIA
 # ==========================================================
 if st.session_state.get("ed_folio"):
     folio_activo = st.session_state["ed_folio"]
@@ -352,40 +417,70 @@ if st.session_state.get("ed_folio"):
     suc_info_folio = CONFIG_SUCURSALES.get(suc_folio, CONFIG_SUCURSALES["IMAC"])
 
     st.markdown("---")
+    fac_badge = f" | Factura SAE: **{st.session_state['ed_factura_anterior']}**" if st.session_state.get("ed_factura_anterior") else ""
     st.success(
-        f"✏️ Editando Folio: **{folio_activo}** | **{BADGE_ESTATUS.get(st.session_state['ed_estatus_anterior'], 'Cotizada')}** | "
+        f"✏️ Editando Folio: **{folio_activo}** | **{BADGE_ESTATUS.get(st.session_state['ed_estatus_anterior'], 'Cotizada')}**{fac_badge} | "
         f"**{suc_info_folio['razon_social']}** ({suc_info_folio['sucursal_corta']}) | "
         f"Total original: **${st.session_state['ed_total_anterior']:,.2f} MXN**"
     )
 
-    # --- Control de Estatus Comercial (con botón de guardado rápido en 1 clic) ---
-    st.markdown("### 📌 Estatus Comercial de la Cotización")
-    e_col1, e_col2 = st.columns([2.0, 1.5])
+    # --- Control de Estatus Comercial + Folio de Factura SAE (Nivel 1 Anti-duplicado) ---
+    st.markdown("### 📌 Estatus Comercial y Folio de Factura SAE")
+    e_col1, e_col2, e_col3 = st.columns([1.2, 1.5, 1.4])
     with e_col1:
         estatus_ed = st.selectbox(
-            "Estatus actual del folio:",
+            "Estatus del folio:",
             ESTATUS_OPCIONES,
             key="ed_estatus",
-            help="Marca como 'Vendida' cuando el cliente concrete la compra o 'Cancelada' si la cotización se descartó."
+            help="Al elegir 'Vendida', es obligatorio capturar el folio exacto de la factura emitida en Aspel SAE."
         )
     with e_col2:
+        etiqueta_fac = "🧾 Folio de Factura SAE (OBLIGATORIO):" if estatus_ed == "Vendida" else "🧾 Folio de Factura SAE (solo al vender):"
+        no_factura_ed = st.text_input(
+            etiqueta_fac,
+            key="ed_no_factura",
+            placeholder="Ej. BRT-T01, IVR-T0145...",
+            help="Captura el folio exacto de la factura en SAE (sin duplicar folios de otras cotizaciones)."
+        )
+    with e_col3:
         st.write("")
         st.write("")
         if st.button("📌 Actualizar Solo Estatus (sin regenerar PDF)", use_container_width=True):
-            with st.spinner(f"Actualizando estatus de {folio_activo} a {estatus_ed}..."):
-                ok_est, msg_est = actualizar_solo_estatus_folio(
-                    hoja_cot, folio_activo, st.session_state["ed_fila_idx"], estatus_ed
-                )
-                if ok_est:
-                    registrar_bitacora(
-                        doc,
-                        "Estatus Cotización",
-                        f"Cambió estatus de {folio_activo} ({suc_folio}) de {st.session_state['ed_estatus_anterior']} a {estatus_ed}"
-                    )
-                    st.session_state["ed_estatus_anterior"] = estatus_ed
-                    st.success(f"✅ Folio **{folio_activo}** marcado como **{BADGE_ESTATUS[estatus_ed]}** ({msg_est}).")
+            factura_guardar = normalizar_folio_factura(no_factura_ed) if estatus_ed == "Vendida" else ""
+            puede_guardar = True
+
+            if estatus_ed == "Vendida":
+                ok_fmt, msg_fmt, factura_guardar = validar_folio_factura_sae(no_factura_ed)
+                if not ok_fmt:
+                    st.error(f"🚫 {msg_fmt}")
+                    puede_guardar = False
                 else:
-                    st.error(f"⚠️ No se pudo actualizar el estatus: {msg_est}")
+                    filas_vivas = hoja_cot.get_all_values()
+                    folio_duplicado = buscar_factura_duplicada(filas_vivas, factura_guardar, folio_activo)
+                    if folio_duplicado:
+                        st.error(f"🚫 La factura SAE **{factura_guardar}** ya está registrada en la cotización **{folio_duplicado}**. No se puede reutilizar el mismo folio.")
+                        puede_guardar = False
+
+            if puede_guardar:
+                with st.spinner(f"Actualizando estatus de {folio_activo} a {estatus_ed}..."):
+                    ok_est, msg_est = actualizar_estatus_y_factura_rapido(
+                        hoja_cot, folio_activo, st.session_state["ed_fila_idx"], estatus_ed, factura_guardar
+                    )
+                    if ok_est:
+                        detalle_fac = f" | Factura SAE: {factura_guardar}" if factura_guardar else ""
+                        registrar_bitacora(
+                            doc,
+                            "Estatus Cotización",
+                            f"Cambió estatus de {folio_activo} ({suc_folio}) de {st.session_state['ed_estatus_anterior']} a {estatus_ed}{detalle_fac}"
+                        )
+                        st.session_state["ed_estatus_anterior"] = estatus_ed
+                        st.session_state["ed_factura_anterior"] = factura_guardar
+                        st.success(f"✅ Folio **{folio_activo}** marcado como **{BADGE_ESTATUS[estatus_ed]}**{detalle_fac} ({msg_est}).")
+                    else:
+                        st.error(f"⚠️ No se pudo actualizar el estatus: {msg_est}")
+
+    if estatus_ed == "Vendida" and not normalizar_folio_factura(no_factura_ed):
+        st.warning("⚠️ Captura el folio de factura SAE (ejemplo: `BRT-T01`) para habilitar el cierre como **Vendida**.")
 
     st.markdown("---")
 
@@ -555,89 +650,108 @@ if st.session_state.get("ed_folio"):
         enviar_correo_ed = st.checkbox("📧 Reenviar copia del PDF actualizado por correo", value=False, key="ed_chk_mail")
 
         if st.button(f"💾 GUARDAR CAMBIOS, ESTATUS ({estatus_ed.upper()}) Y REGENERAR PDF", type="primary", use_container_width=True):
-            with st.spinner(f"Actualizando {folio_activo} en Google Sheets y regenerando PDF personalizado..."):
-                cliente_final = cliente_ed.strip() if cliente_ed.strip() else "MOSTRADOR"
-                asesor_final = asesor_ed.strip() if asesor_ed.strip() else asesor_nombre_db
+            factura_guardar = normalizar_folio_factura(no_factura_ed) if estatus_ed == "Vendida" else ""
+            valido_para_guardar = True
 
-                pdf_bytes, tot_pdf, sub_pdf, iva_pdf, ahorr_pdf, desc_n1_pdf = generar_pdf_mostrador(
-                    folio=folio_activo,
-                    sucursal_nombre=suc_folio,
-                    suc_info=suc_info_folio,
-                    cliente=cliente_final,
-                    telefono_cli=telefono_ed,
-                    correo_cli=correo_ed,
-                    asesor_nombre=asesor_final,
-                    asesor_telefono=st.session_state.get("ed_asesor_tel", ""),
-                    asesor_correo=st.session_state.get("ed_asesor_correo", ""),
-                    validez=vigencia_ed,
-                    carrito=st.session_state["ed_carrito"],
-                    flete=flete_ed,
-                    desc_extra_pct=desc_extra_ed,
-                    precios_incluyen_iva=PRECIOS_INCLUYEN_IVA,
-                    notas=notas_ed,
-                    mostrar_col_desc=False
-                )
-
-                fecha_act = ahora_mx().strftime("%d/%m/%Y %H:%M")
-                resumen_partidas = " / ".join([
-                    f"{x['cantidad']:g}x {x['clave']} ({x['nivel']}" + (f" -{x['desc_pct']:g}%" if x.get("desc_pct", 0.0) > 0 else "") + ")"
-                    for x in st.session_state["ed_carrito"]
-                ])
-                payload_json = json.dumps({
-                    "partidas": st.session_state["ed_carrito"],
-                    "flete": flete_ed,
-                    "desc_extra_pct": desc_extra_ed,
-                    "precios_incluyen_iva": PRECIOS_INCLUYEN_IVA,
-                    "notas": notas_ed,
-                    "correo_cliente": correo_ed,
-                    "vigencia": vigencia_ed.strftime("%d/%m/%Y"),
-                    "asesor_telefono": st.session_state.get("ed_asesor_tel", ""),
-                    "asesor_correo": st.session_state.get("ed_asesor_correo", ""),
-                    "estatus": estatus_ed
-                }, ensure_ascii=False)
-
-                fila_actualizada = [
-                    folio_activo, fecha_act, suc_folio, asesor_final,
-                    cliente_final.upper(), telefono_ed, len(st.session_state["ed_carrito"]),
-                    resumen_partidas, round(sub_pdf, 2), round(iva_pdf, 2),
-                    round(tot_pdf, 2), round(ahorr_pdf, 2), payload_json, estatus_ed
-                ]
-
-                ok_upd, msg_upd = actualizar_fila_cotizacion_con_estatus(
-                    hoja_cot, folio_activo, st.session_state["ed_fila_idx"], fila_actualizada
-                )
-
-                if ok_upd:
-                    registrar_bitacora(
-                        doc,
-                        "Edición Cotizaciones",
-                        f"Actualizó {folio_activo} ({suc_folio}) | Estatus: {st.session_state['ed_estatus_anterior']} -> {estatus_ed} | Total: ${st.session_state['ed_total_anterior']:,.2f} -> ${tot_pdf:,.2f} MXN"
-                    )
-                    st.session_state["ed_total_anterior"] = tot_pdf
-                    st.session_state["ed_estatus_anterior"] = estatus_ed
-                    nombre_pdf = f"Cotizacion_{folio_activo}_{cliente_final.replace(' ', '_')}.pdf"
-                    st.session_state["ed_pdf_bytes"] = pdf_bytes
-                    st.session_state["ed_pdf_nombre"] = nombre_pdf
-
-                    if enviar_correo_ed:
-                        destinos = [st.session_state.get("ed_asesor_correo") or suc_info_folio["correo"]]
-                        if suc_info_folio["correo"] not in destinos:
-                            destinos.append(suc_info_folio["correo"])
-                        if correo_ed.strip():
-                            destinos.append(correo_ed.strip())
-                        dest_str = ", ".join(destinos)
-                        ok_mail, msg_mail = enviar_respaldo_correo(
-                            pdf_bytes, nombre_pdf, folio_activo, suc_folio,
-                            cliente_final, asesor_final, tot_pdf, dest_str, es_edicion=True
-                        )
-                        if ok_mail:
-                            st.info(f"📧 PDF actualizado enviado a: {dest_str}")
-                        else:
-                            st.warning(f"⚠️ No se pudo enviar el correo: {msg_mail}")
-
-                    st.success(f"✅ Folio **{folio_activo}** ({BADGE_ESTATUS[estatus_ed]}) actualizado ({msg_upd}).")
+            if estatus_ed == "Vendida":
+                ok_fmt, msg_fmt, factura_guardar = validar_folio_factura_sae(no_factura_ed)
+                if not ok_fmt:
+                    st.error(f"🚫 {msg_fmt}")
+                    valido_para_guardar = False
                 else:
-                    st.error(f"⚠️ No se pudo actualizar en Google Sheets: {msg_upd}")
+                    filas_vivas = hoja_cot.get_all_values()
+                    folio_duplicado = buscar_factura_duplicada(filas_vivas, factura_guardar, folio_activo)
+                    if folio_duplicado:
+                        st.error(f"🚫 La factura SAE **{factura_guardar}** ya está registrada en la cotización **{folio_duplicado}**. No se puede reutilizar el mismo folio.")
+                        valido_para_guardar = False
+
+            if valido_para_guardar:
+                with st.spinner(f"Actualizando {folio_activo} en Google Sheets y regenerando PDF personalizado..."):
+                    cliente_final = cliente_ed.strip() if cliente_ed.strip() else "MOSTRADOR"
+                    asesor_final = asesor_ed.strip() if asesor_ed.strip() else asesor_nombre_db
+
+                    pdf_bytes, tot_pdf, sub_pdf, iva_pdf, ahorr_pdf, desc_n1_pdf = generar_pdf_mostrador(
+                        folio=folio_activo,
+                        sucursal_nombre=suc_folio,
+                        suc_info=suc_info_folio,
+                        cliente=cliente_final,
+                        telefono_cli=telefono_ed,
+                        correo_cli=correo_ed,
+                        asesor_nombre=asesor_final,
+                        asesor_telefono=st.session_state.get("ed_asesor_tel", ""),
+                        asesor_correo=st.session_state.get("ed_asesor_correo", ""),
+                        validez=vigencia_ed,
+                        carrito=st.session_state["ed_carrito"],
+                        flete=flete_ed,
+                        desc_extra_pct=desc_extra_ed,
+                        precios_incluyen_iva=PRECIOS_INCLUYEN_IVA,
+                        notas=notas_ed,
+                        mostrar_col_desc=False
+                    )
+
+                    fecha_act = ahora_mx().strftime("%d/%m/%Y %H:%M")
+                    resumen_partidas = " / ".join([
+                        f"{x['cantidad']:g}x {x['clave']} ({x['nivel']}" + (f" -{x['desc_pct']:g}%" if x.get("desc_pct", 0.0) > 0 else "") + ")"
+                        for x in st.session_state["ed_carrito"]
+                    ])
+                    payload_json = json.dumps({
+                        "partidas": st.session_state["ed_carrito"],
+                        "flete": flete_ed,
+                        "desc_extra_pct": desc_extra_ed,
+                        "precios_incluyen_iva": PRECIOS_INCLUYEN_IVA,
+                        "notas": notas_ed,
+                        "correo_cliente": correo_ed,
+                        "vigencia": vigencia_ed.strftime("%d/%m/%Y"),
+                        "asesor_telefono": st.session_state.get("ed_asesor_tel", ""),
+                        "asesor_correo": st.session_state.get("ed_asesor_correo", ""),
+                        "estatus": estatus_ed,
+                        "no_factura": factura_guardar
+                    }, ensure_ascii=False)
+
+                    fila_actualizada = [
+                        folio_activo, fecha_act, suc_folio, asesor_final,
+                        cliente_final.upper(), telefono_ed, len(st.session_state["ed_carrito"]),
+                        resumen_partidas, round(sub_pdf, 2), round(iva_pdf, 2),
+                        round(tot_pdf, 2), round(ahorr_pdf, 2), payload_json, estatus_ed, factura_guardar
+                    ]
+
+                    ok_upd, msg_upd = actualizar_fila_cotizacion_completa(
+                        hoja_cot, folio_activo, st.session_state["ed_fila_idx"], fila_actualizada
+                    )
+
+                    if ok_upd:
+                        detalle_fac = f" | Factura SAE: {factura_guardar}" if factura_guardar else ""
+                        registrar_bitacora(
+                            doc,
+                            "Edición Cotizaciones",
+                            f"Actualizó {folio_activo} ({suc_folio}) | Estatus: {st.session_state['ed_estatus_anterior']} -> {estatus_ed}{detalle_fac} | Total: ${st.session_state['ed_total_anterior']:,.2f} -> ${tot_pdf:,.2f} MXN"
+                        )
+                        st.session_state["ed_total_anterior"] = tot_pdf
+                        st.session_state["ed_estatus_anterior"] = estatus_ed
+                        st.session_state["ed_factura_anterior"] = factura_guardar
+                        nombre_pdf = f"Cotizacion_{folio_activo}_{cliente_final.replace(' ', '_')}.pdf"
+                        st.session_state["ed_pdf_bytes"] = pdf_bytes
+                        st.session_state["ed_pdf_nombre"] = nombre_pdf
+
+                        if enviar_correo_ed:
+                            destinos = [st.session_state.get("ed_asesor_correo") or suc_info_folio["correo"]]
+                            if suc_info_folio["correo"] not in destinos:
+                                destinos.append(suc_info_folio["correo"])
+                            if correo_ed.strip():
+                                destinos.append(correo_ed.strip())
+                            dest_str = ", ".join(destinos)
+                            ok_mail, msg_mail = enviar_respaldo_correo(
+                                pdf_bytes, nombre_pdf, folio_activo, suc_folio,
+                                cliente_final, asesor_final, tot_pdf, dest_str, es_edicion=True
+                            )
+                            if ok_mail:
+                                st.info(f"📧 PDF actualizado enviado a: {dest_str}")
+                            else:
+                                st.warning(f"⚠️ No se pudo enviar el correo: {msg_mail}")
+
+                        st.success(f"✅ Folio **{folio_activo}** ({BADGE_ESTATUS[estatus_ed]}{detalle_fac}) actualizado ({msg_upd}).")
+                    else:
+                        st.error(f"⚠️ No se pudo actualizar en Google Sheets: {msg_upd}")
 
         if st.session_state.get("ed_pdf_bytes"):
             st.download_button(
