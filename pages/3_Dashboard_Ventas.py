@@ -2,6 +2,7 @@ import streamlit as st
 import datetime
 import json
 import os
+import re
 import sys
 import pandas as pd
 from PIL import Image
@@ -67,6 +68,9 @@ def normalizar_estatus(valor_raw):
         return "Cancelada"
     return "Cotizada"
 
+def normalizar_folio_factura(raw):
+    return re.sub(r"\s+", "", str(raw or "").strip().upper())
+
 def parsear_fecha_sheet(fecha_str):
     txt = str(fecha_str or "").strip()
     for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -108,6 +112,7 @@ def cargar_datos_cotizaciones(doc):
 
         estatus_col = str(fila[13]).strip() if len(fila) > 13 else ""
         estatus = normalizar_estatus(estatus_col) if estatus_col else ""
+        no_factura = normalizar_folio_factura(fila[14]) if len(fila) > 14 else ""
 
         flete = 0.0
         desc_global_pct = 0.0
@@ -120,6 +125,8 @@ def cargar_datos_cotizaciones(doc):
                 payload = json.loads(datos_json_raw)
                 if not estatus and payload.get("estatus"):
                     estatus = normalizar_estatus(payload.get("estatus"))
+                if not no_factura and payload.get("no_factura"):
+                    no_factura = normalizar_folio_factura(payload.get("no_factura"))
                 flete = float(payload.get("flete", 0.0) or 0.0)
                 desc_global_pct = float(payload.get("desc_extra_pct", 0.0) or 0.0)
                 partidas_temp = payload.get("partidas", [])
@@ -148,6 +155,7 @@ def cargar_datos_cotizaciones(doc):
             registros_prod.append({
                 "Folio": folio,
                 "Estatus": estatus,
+                "No_Factura": no_factura,
                 "Fecha_DT": fecha_dt,
                 "Sucursal": suc_norm,
                 "Razon_Social": razon_social,
@@ -163,6 +171,8 @@ def cargar_datos_cotizaciones(doc):
         registros_cot.append({
             "Folio": folio,
             "Estatus": estatus,
+            "No_Factura": no_factura,
+            "Tiene_Factura": 1 if (estatus == "Vendida" and bool(no_factura)) else 0,
             "Fecha_Texto": fecha_raw,
             "Fecha_DT": fecha_dt,
             "Fecha_Dia": fecha_dt.date() if fecha_dt else None,
@@ -192,13 +202,14 @@ def cargar_datos_cotizaciones(doc):
     return df_cot, df_prod
 
 def calcular_tabla_conversion(df_base, cols_grupo):
-    """Agrupa por sucursal/asesor/razón social y calcula tasas de conversión por folios y por monto."""
+    """Agrupa por sucursal/asesor/razón social y calcula tasas de conversión por folios, monto y respaldo SAE."""
     res = (
         df_base.groupby(cols_grupo, as_index=False)
         .agg(
             Folios=("Folio", "count"),
             Cotizadas=("Es_Cotizada", "sum"),
             Vendidas=("Es_Vendida", "sum"),
+            Con_Factura=("Tiene_Factura", "sum"),
             Canceladas=("Es_Cancelada", "sum"),
             Total_MXN=("Total_MXN", "sum"),
             Monto_Vendido=("Monto_Vendido", "sum"),
@@ -236,8 +247,8 @@ with col_logo:
     else:
         st.markdown("### 🏢 IMAC")
 with col_tit:
-    st.title("Dashboard Comercial y Conversión — Sistemas Ligeros")
-    st.caption(f"Monitoreo ejecutivo de cotizaciones, cierres y tasa de conversión por sucursal y asesor | Corte: {ahora_mx().strftime('%d/%m/%Y %H:%M hrs')}")
+    st.title("Dashboard Comercial y Conversión — Grupo IMAC")
+    st.caption(f"Monitoreo ejecutivo de cotizaciones, cierres y folios de factura SAE | Corte: {ahora_mx().strftime('%d/%m/%Y %H:%M hrs')}")
 st.markdown("---")
 
 doc = conectar_sheets()
@@ -300,18 +311,18 @@ if df_f.empty:
 folios_activos = set(df_f["Folio"].tolist())
 df_pf = df_prod[df_prod["Folio"].isin(folios_activos)].copy() if not df_prod.empty else pd.DataFrame()
 
-# --- 3. KPIs EJECUTIVOS Y CONVERSIÓN ---
+# --- 3. KPIs EJECUTIVOS, CONVERSIÓN Y RESPALDO SAE ---
 monto_total = float(df_f["Total_MXN"].sum())
 monto_vendido = float(df_f["Monto_Vendido"].sum())
 num_folios = int(len(df_f))
 num_vendidas = int(df_f["Es_Vendida"].sum())
+num_con_fac = int(df_f["Tiene_Factura"].sum())
 num_cotizadas = int(df_f["Es_Cotizada"].sum())
 num_canceladas = int(df_f["Es_Cancelada"].sum())
 
 conv_folios_pct = (num_vendidas / num_folios * 100.0) if num_folios > 0 else 0.0
 conv_monto_pct = (monto_vendido / monto_total * 100.0) if monto_total > 0 else 0.0
-cerradas_total = num_vendidas + num_canceladas
-win_rate_cerradas = (num_vendidas / cerradas_total * 100.0) if cerradas_total > 0 else 0.0
+respaldo_sae_pct = (num_con_fac / num_vendidas * 100.0) if num_vendidas > 0 else 100.0
 
 ticket_prom = monto_total / num_folios if num_folios > 0 else 0.0
 ticket_prom_vendido = monto_vendido / num_vendidas if num_vendidas > 0 else 0.0
@@ -322,19 +333,19 @@ k1.metric("💰 Monto Cotizado (c/IVA)", f"${monto_total:,.2f}", f"{num_folios:,
 k2.metric("🟢 Monto Vendido", f"${monto_vendido:,.2f}", f"{conv_monto_pct:.1f}% del monto")
 k3.metric("📈 Conversión (Folios)", f"{conv_folios_pct:.1f}%", f"{num_vendidas} de {num_folios} vendidas")
 k4.metric("🎯 Ticket Promedio", f"${ticket_prom:,.2f}", f"Vendido: ${ticket_prom_vendido:,.2f}")
-k5.metric("🟡 Abiertas / 🔴 Cancel.", f"{num_cotizadas} / {num_canceladas}", f"Win-rate cerradas: {win_rate_cerradas:.1f}%")
+k5.metric("🧾 Respaldo Factura SAE", f"{respaldo_sae_pct:.1f}%", f"{num_con_fac}/{num_vendidas} con folio SAE")
 
 if sel_estatus != "TODOS":
-    st.caption(f"ℹ️ Estás filtrando únicamente el estatus **{sel_estatus}**. Para ver la tasa de conversión completa entre los 3 estatus, selecciona **TODOS** en el filtro Estatus.")
+    st.caption(f"ℹ️ Estás filtrando únicamente el estatus **{sel_estatus}**. Para ver la tasa de conversión completa entre los 3 estatus, selecciona **TODOS**.")
 
 st.markdown("---")
 
 # --- 4. PESTAÑAS ANALÍTICAS ---
-tab_suc, tab_ase, tab_prod, tab_tend = st.tabs([
+tab_suc, tab_ase, tab_prod, tab_sae = st.tabs([
     "🏢 Conversión por Sucursal",
     "👤 Conversión por Asesor",
     "📦 Productos Más Cotizados",
-    "📈 Tendencia y Detalle"
+    "🧾 Auditoría SAE y Detalle"
 ])
 
 # ==========================================================
@@ -342,7 +353,6 @@ tab_suc, tab_ase, tab_prod, tab_tend = st.tabs([
 # ==========================================================
 with tab_suc:
     res_suc = calcular_tabla_conversion(df_f, ["Sucursal", "Razon_Social"]).sort_values("Total_MXN", ascending=False)
-    res_suc["Participacion_Pct"] = (res_suc["Total_MXN"] / monto_total * 100.0) if monto_total > 0 else 0.0
 
     c_left, c_right = st.columns([1.25, 1.0])
     with c_left:
@@ -385,6 +395,7 @@ with tab_suc:
                     tooltip=[
                         alt.Tooltip("Sucursal:N", title="Sucursal"),
                         alt.Tooltip("Vendidas:Q", title="Vendidas"),
+                        alt.Tooltip("Con_Factura:Q", title="Con Factura SAE"),
                         alt.Tooltip("Folios:Q", title="Total Folios"),
                         alt.Tooltip("Conv_Folios_Pct:Q", title="Conv. Folios %", format=".1f"),
                         alt.Tooltip("Conv_Monto_Pct:Q", title="Conv. Monto %", format=".1f"),
@@ -398,7 +409,7 @@ with tab_suc:
 
     st.markdown("#### Consolidado y Conversión por Razón Social")
     res_rs = calcular_tabla_conversion(df_f, ["Razon_Social"]).sort_values("Total_MXN", ascending=False)
-    df_rs_show = res_rs[["Razon_Social", "Folios", "Cotizadas", "Vendidas", "Canceladas", "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct"]].copy()
+    df_rs_show = res_rs[["Razon_Social", "Folios", "Cotizadas", "Vendidas", "Con_Factura", "Canceladas", "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct"]].copy()
     df_rs_show["Conv_Folios_Pct"] = df_rs_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
     df_rs_show["Conv_Monto_Pct"] = df_rs_show["Conv_Monto_Pct"].map(lambda v: f"{v:.1f}%")
     df_rs_show["Total_MXN"] = df_rs_show["Total_MXN"].map(lambda v: f"${v:,.2f}")
@@ -406,6 +417,7 @@ with tab_suc:
     st.dataframe(
         df_rs_show.rename(columns={
             "Razon_Social": "Razón Social",
+            "Con_Factura": "Con Fact. SAE",
             "Conv_Folios_Pct": "Conv. Folios",
             "Total_MXN": "Monto Cotizado",
             "Monto_Vendido": "Monto Vendido",
@@ -417,22 +429,22 @@ with tab_suc:
 
     st.markdown("#### Tabla Comparativa por Sucursal")
     df_suc_show = res_suc[[
-        "Sucursal", "Razon_Social", "Folios", "Cotizadas", "Vendidas", "Canceladas",
-        "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct", "Ticket_Promedio", "Ticket_Vendido"
+        "Sucursal", "Razon_Social", "Folios", "Cotizadas", "Vendidas", "Con_Factura", "Canceladas",
+        "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct", "Ticket_Promedio"
     ]].copy()
     df_suc_show["Conv_Folios_Pct"] = df_suc_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
     df_suc_show["Conv_Monto_Pct"] = df_suc_show["Conv_Monto_Pct"].map(lambda v: f"{v:.1f}%")
-    for col_m in ["Total_MXN", "Monto_Vendido", "Ticket_Promedio", "Ticket_Vendido"]:
+    for col_m in ["Total_MXN", "Monto_Vendido", "Ticket_Promedio"]:
         df_suc_show[col_m] = df_suc_show[col_m].map(lambda v: f"${v:,.2f}")
     st.dataframe(
         df_suc_show.rename(columns={
             "Razon_Social": "Razón Social",
+            "Con_Factura": "Con Fact. SAE",
             "Conv_Folios_Pct": "Conv. Folios",
             "Total_MXN": "Cotizado MXN",
             "Monto_Vendido": "Vendido MXN",
             "Conv_Monto_Pct": "Conv. Monto",
             "Ticket_Promedio": "Ticket Prom.",
-            "Ticket_Vendido": "Ticket Vendido",
         }),
         use_container_width=True,
         hide_index=True,
@@ -489,10 +501,10 @@ with tab_ase:
                         alt.Tooltip("Asesor:N", title="Asesor"),
                         alt.Tooltip("Sucursal:N", title="Sucursal"),
                         alt.Tooltip("Vendidas:Q", title="Vendidas"),
+                        alt.Tooltip("Con_Factura:Q", title="Con Factura SAE"),
                         alt.Tooltip("Folios:Q", title="Total Folios"),
                         alt.Tooltip("Conv_Folios_Pct:Q", title="Conv. Folios %", format=".1f"),
                         alt.Tooltip("Conv_Monto_Pct:Q", title="Conv. Monto %", format=".1f"),
-                        alt.Tooltip("Ticket_Promedio:Q", title="Ticket Promedio", format="$,.2f"),
                     ],
                 )
                 .properties(height=330)
@@ -503,7 +515,7 @@ with tab_ase:
 
     st.markdown("#### Desempeño y Conversión Detallada por Asesor")
     df_ase_show = res_ase[[
-        "Asesor", "Sucursal", "Folios", "Cotizadas", "Vendidas", "Canceladas",
+        "Asesor", "Sucursal", "Folios", "Cotizadas", "Vendidas", "Con_Factura", "Canceladas",
         "Conv_Folios_Pct", "Total_MXN", "Monto_Vendido", "Conv_Monto_Pct", "Ticket_Promedio", "Desc_N1"
     ]].copy()
     df_ase_show["Conv_Folios_Pct"] = df_ase_show["Conv_Folios_Pct"].map(lambda v: f"{v:.1f}%")
@@ -512,6 +524,7 @@ with tab_ase:
         df_ase_show[col_m] = df_ase_show[col_m].map(lambda v: f"${v:,.2f}")
     st.dataframe(
         df_ase_show.rename(columns={
+            "Con_Factura": "Con Fact. SAE",
             "Conv_Folios_Pct": "Conv. Folios",
             "Total_MXN": "Cotizado MXN",
             "Monto_Vendido": "Vendido MXN",
@@ -624,12 +637,45 @@ with tab_prod:
             )
 
 # ==========================================================
-# TAB 4: TENDENCIA DIARIA POR ESTATUS Y EXPORTACIÓN CSV
+# TAB 4: AUDITORÍA DE FACTURAS SAE, TENDENCIA Y EXPORTACIÓN
 # ==========================================================
-with tab_tend:
+with tab_sae:
+    st.markdown("#### 🧾 Lista de Ventas Reportadas para Cotejo en Aspel SAE")
+    df_vendidas = df_f[df_f["Estatus"] == "Vendida"].copy()
+
+    if df_vendidas.empty:
+        st.info("No hay cotizaciones marcadas como Vendida en los filtros actuales.")
+    else:
+        sin_fac = df_vendidas[df_vendidas["No_Factura"] == ""]
+        con_fac_series = df_vendidas[df_vendidas["No_Factura"] != ""]["No_Factura"]
+        dups_fac = con_fac_series[con_fac_series.duplicated(keep=False)].unique().tolist()
+
+        if len(sin_fac) > 0:
+            st.warning(f"⚠️ Hay **{len(sin_fac)}** cotización(es) marcada(s) como Vendida sin folio de factura SAE registrado (registros previos al candado).")
+        if dups_fac:
+            st.error(f"🚨 Se detectaron folios de factura SAE repetidos en la hoja: **{', '.join(dups_fac)}**.")
+        if len(sin_fac) == 0 and not dups_fac:
+            st.success(f"✅ **100.0%** de las {len(df_vendidas)} ventas reportadas cuentan con folio de factura SAE único listo para cotejar en sistema.")
+
+        df_sae_tbl = df_vendidas[["No_Factura", "Folio", "Fecha_Texto", "Sucursal", "Razon_Social", "Asesor", "Cliente", "Total_MXN"]].sort_values("Folio", ascending=False)
+        st.dataframe(
+            df_sae_tbl.assign(
+                No_Factura=df_sae_tbl["No_Factura"].replace("", "⚠️ SIN FOLIO"),
+                Total_MXN=df_sae_tbl["Total_MXN"].map(lambda v: f"${v:,.2f}")
+            ).rename(columns={
+                "No_Factura": "Factura SAE",
+                "Fecha_Texto": "Fecha",
+                "Razon_Social": "Razón Social",
+                "Total_MXN": "Total MXN"
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("---")
     df_fechas = df_f.dropna(subset=["Fecha_Dia"]).copy()
     if not df_fechas.empty:
-        st.markdown("#### Evolución Diaria por Estatus (MXN)")
+        st.markdown("#### 📈 Evolución Diaria por Estatus (MXN)")
         res_dia = (
             df_fechas.groupby(["Fecha_Dia", "Estatus"], as_index=False)
             .agg(Folios=("Folio", "count"), Total_MXN=("Total_MXN", "sum"))
@@ -651,26 +697,28 @@ with tab_tend:
                         alt.Tooltip("Total_MXN:Q", title="Monto MXN", format="$,.2f"),
                     ],
                 )
-                .properties(height=280)
+                .properties(height=270)
             )
             st.altair_chart(chart_dia, use_container_width=True)
         else:
             st.bar_chart(res_dia.pivot(index="Fecha_Str", columns="Estatus", values="Total_MXN").fillna(0))
 
-    st.markdown("#### Base Filtrada de Cotizaciones")
+    st.markdown("#### Base Completa Filtrada de Cotizaciones")
     cols_exp = [
-        "Folio", "Estatus", "Fecha_Texto", "Sucursal", "Razon_Social", "Asesor",
+        "Folio", "Estatus", "No_Factura", "Fecha_Texto", "Sucursal", "Razon_Social", "Asesor",
         "Cliente", "Partidas", "Subtotal", "IVA", "Total_MXN", "Ahorro_Volumen", "Desc_Especial_N1"
     ]
     df_export = df_f[cols_exp].sort_values("Folio", ascending=False)
     st.dataframe(
         df_export.assign(
+            No_Factura=df_export["No_Factura"].replace("", "—"),
             Subtotal=df_export["Subtotal"].map(lambda v: f"${v:,.2f}"),
             IVA=df_export["IVA"].map(lambda v: f"${v:,.2f}"),
             Total_MXN=df_export["Total_MXN"].map(lambda v: f"${v:,.2f}"),
             Ahorro_Volumen=df_export["Ahorro_Volumen"].map(lambda v: f"${v:,.2f}"),
             Desc_Especial_N1=df_export["Desc_Especial_N1"].map(lambda v: f"${v:,.2f}"),
         ).rename(columns={
+            "No_Factura": "Factura SAE",
             "Fecha_Texto": "Fecha",
             "Razon_Social": "Razón Social",
             "Total_MXN": "Total MXN",
@@ -683,9 +731,9 @@ with tab_tend:
 
     csv_bytes = df_export.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        label="⬇️ EXPORTAR REPORTE CON ESTATUS A EXCEL (CSV)",
+        label="⬇️ EXPORTAR REPORTE CON FACTURAS SAE A EXCEL (CSV)",
         data=csv_bytes,
-        file_name=f"Dashboard_Conversion_IMAC_{ahora_mx().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"Dashboard_Auditoria_SAE_IMAC_{ahora_mx().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
         use_container_width=True,
     )
